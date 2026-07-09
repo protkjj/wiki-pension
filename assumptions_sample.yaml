@@ -1,0 +1,34 @@
+# 계산 설정 샘플 — 모든 가정은 이 YAML로 제어한다.
+# 스칼라 축약 표기(discount_rate: 0.045)와 명시 표기({flat: 0.045}) 모두 지원.
+
+valuation_date: 2025-12-31
+
+# 할인율 (단일값; 향후 기간별 커브로 확장 가능)
+discount_rate: 0.045          # 4.5%
+
+# 임금상승률 (단일값; 향후 연령별/근속별 테이블로 확장 가능)
+salary_increase_rate: 0.03    # 3.0%
+
+# 정년 (종업원구분별 지정 가능; 미지정 구분은 default)
+retirement_age:
+  default: 60
+  by_class:
+    EXECUTIVE: 65
+    REGULAR: 60
+    CONTRACT: 60
+
+# 계산 convention
+decrement_timing: end_of_year          # 탈퇴 발생 시점: end_of_year | mid_year
+salary_increase_timing: start_of_year  # 임금상승 반영: start_of_year | mid_year | end_of_year
+discount_timing: end_of_year           # 할인 기간 산정: end_of_year | mid_year (탈퇴 timing과 정합)
+service_day_count: "act/365"           # 근속 일할: act/365 | act/365.25 | months
+retirement_rate_basis: age             # 퇴직률 적용 기준: age | service
+csc_method: one_year_slice             # 당기근무원가 convention: one_year_slice | attained_minus_prior
+
+rounding: 1                            # 최종 반올림 단위 (원)
+
+# 탈퇴율 테이블 경로 (config 파일 기준 상대경로)
+decrement_tables:
+  retirement_by_age: decrement_tables/retirement_rates_age.csv
+  retirement_by_service: decrement_tables/retirement_rates_service.csv
+  mortality: decrement_tables/mortality.csv

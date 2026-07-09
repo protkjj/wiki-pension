@@ -1,0 +1,295 @@
+"""DC(확정기여)형 부담금 산정·납부 관리 지원.
+
+중소기업의 DC 부담금(보험료) 산출·인별 납부액·납부 계좌 관리 부담을 줄이기 위해,
+가입자 임금·계좌 명부로 인별 부담금을 산정하고 납부명세서를 생성한다.
+
+부담금(법정 최소) = 연간 임금총액 × 1/12.
+연중 입·퇴사자는 대상연도 재직일수로 일할(prorate)한다.
+
+개인정보 주의: 계좌번호 등은 납부에 필요해 입력받지만, 이 모듈은 계산·명세서 생성만 하고
+DB에 저장하지 않는다(메모리 처리 후 다운로드).
+"""
+
+from __future__ import annotations
+
+import io
+from datetime import date
+from typing import Dict, List, Optional, Union
+
+from .census import _emp_id_to_str, _norm_header
+from .experience import _to_date, _to_float
+
+# 입력 컬럼 별칭(헤더 자동 인식)
+_COLS = {
+    "emp_id": ["사원번호", "사번", "직원번호", "사원코드", "empid", "id"],
+    "dept": ["소속", "부서", "부서명", "dept"],
+    "wage": ["연간임금총액", "연간임금", "임금총액", "연봉", "기준임금", "임금", "wage"],
+    "bank": ["금융기관", "은행", "운용사", "기관", "사업자", "bank"],
+    "bank_code": ["은행코드", "기관코드", "코드", "bank_code"],
+    "account": ["계좌번호", "계좌", "irp계좌", "account"],
+    "hire": ["입사일자", "입사일", "hire"],
+    "leave": ["퇴사일자", "퇴사일", "퇴직일", "퇴직일자", "leave"],
+    "adjust": ["가감률", "가감계수", "가감", "조정률", "adjust"],
+    "principal": ["적립원금", "납입원금", "원금", "principal"],
+    "value": ["평가액", "평가금액", "적립금평가액", "value"],
+    "status": ["납부상태", "상태", "납부여부", "status"],
+}
+
+# 표시용 라벨(납부명세서·화면 공통)
+COLUMNS = ["사번", "소속", "연간임금", "재직일수", "납부액(부담금)", "금융기관", "은행코드", "계좌번호"]
+
+
+def parse_dc_roster(source: Union[str, bytes]) -> List[Dict]:
+    """DC 가입자·계좌 명부(xlsx/csv)를 파싱 — 헤더 자동 인식. 계좌는 문자열 보존."""
+    import pandas as pd
+
+    def _pick(sheets: Dict) -> "pd.DataFrame":
+        """사원번호 헤더가 있는 시트를 고른다(작성요령 시트 회피)."""
+        emp_aliases = {_norm_header(a) for a in _COLS["emp_id"]}
+        for name, d in sheets.items():
+            if "요령" in str(name):
+                continue
+            if any(_norm_header(c) in emp_aliases for c in d.columns):
+                return d
+        # 못 찾으면 요령 제외 첫 시트, 그것도 없으면 첫 시트
+        for name, d in sheets.items():
+            if "요령" not in str(name):
+                return d
+        return next(iter(sheets.values()))
+
+    if isinstance(source, (bytes, bytearray)):
+        df = _pick(pd.read_excel(io.BytesIO(source), dtype=str, sheet_name=None))
+    else:
+        p = str(source)
+        if p.lower().endswith(".csv"):
+            df = pd.read_csv(p, dtype=str)
+        else:
+            df = _pick(pd.read_excel(p, dtype=str, sheet_name=None))
+
+    norm = {}
+    for c in df.columns:
+        norm.setdefault(_norm_header(c), c)
+    colmap = {}
+    for f, al in _COLS.items():
+        for a in al:
+            if _norm_header(a) in norm:
+                colmap[f] = norm[_norm_header(a)]
+                break
+
+    def _cell(r, f):
+        c = colmap.get(f)
+        if c is None:
+            return None
+        v = r.get(c)
+        return None if (v is None or (isinstance(v, float) and pd.isna(v)) or v == "") else v
+
+    rows: List[Dict] = []
+    for _, r in df.iterrows():
+        emp = _emp_id_to_str(_cell(r, "emp_id"))
+        if not emp:
+            continue
+        def _s(f):
+            v = _cell(r, f)
+            return str(v).strip() if v is not None else ""
+        rows.append({
+            "emp_id": emp,
+            "dept": _s("dept"),
+            "wage": _to_float(_cell(r, "wage")),
+            "bank": _s("bank"),
+            "bank_code": _s("bank_code"),
+            "account": _s("account"),
+            "hire": _to_date(_cell(r, "hire")),
+            "leave": _to_date(_cell(r, "leave")),
+            "adjust": _to_float(_cell(r, "adjust")),
+            "principal": _to_float(_cell(r, "principal")),
+            "value": _to_float(_cell(r, "value")),
+            "status": _s("status"),
+        })
+    return rows
+
+
+def _service_months(start: date, end: date) -> int:
+    """재직 개월수(달력월 겹침, 양끝 포함). 전체연도 = 12."""
+    if end < start:
+        return 0
+    return (end.year - start.year) * 12 + (end.month - start.month) + 1
+
+
+def compute_dc_contributions(rows: List[Dict], plan_year: int, denom: int = 12,
+                             proration: str = "daily", adjust: float = 1.0,
+                             floor: float = 0.0, cap: Optional[float] = None):
+    """인별 DC 부담금 산정 (산식 옵션 지원).
+
+    부담금 = 연간임금 × 1/denom × 가감률, 연간 상·하한 적용 후 재직기간 일할.
+      proration: 'daily'(재직일수/365) | 'monthly'(재직월수/12)
+      adjust: 전역 가감률(행에 '가감률'이 있으면 그 값 우선)
+      floor/cap: 연간 부담금(일할 전) 하한/상한 (0/None이면 미적용)
+
+    반환: (out_rows[+days,months,frac,contribution], summary)
+    """
+    ys, ye = date(plan_year, 1, 1), date(plan_year, 12, 31)
+    days_year = (ye - ys).days + 1
+    out: List[Dict] = []
+    total = 0.0
+    n_miss_acc = n_miss_wage = 0
+    for r in rows:
+        wage = r.get("wage") or 0.0
+        if not r.get("wage"):
+            n_miss_wage += 1
+        start = max(r["hire"], ys) if r.get("hire") else ys
+        end = min(r["leave"], ye) if r.get("leave") else ye
+        days = (end - start).days + 1 if end >= start else 0
+        months = _service_months(start, end)
+        frac = (months / 12) if proration == "monthly" else (days / days_year if days_year else 0.0)
+        eff_adj = r.get("adjust") if r.get("adjust") else adjust
+        annual = wage / denom * (eff_adj or 1.0)      # 일할 전 연간 부담금
+        if floor:
+            annual = max(annual, floor)
+        if cap is not None:
+            annual = min(annual, cap)
+        contribution = round(annual * frac)
+        total += contribution
+        if not r.get("account"):
+            n_miss_acc += 1
+        out.append({**r, "days": days, "months": months, "frac": round(frac, 4),
+                    "contribution": contribution})
+    summary = {"n": len(out), "total": total, "plan_year": plan_year, "denom": denom,
+               "proration": proration, "adjust": adjust, "floor": floor, "cap": cap,
+               "n_missing_account": n_miss_acc, "n_missing_wage": n_miss_wage}
+    return out, summary
+
+
+def monthly_split(rows: List[Dict], months: int = 12) -> List[Dict]:
+    """인별 부담금을 균등 분할(마지막 달이 잔액 흡수). 반환: 각 행 + 'monthly'(리스트)."""
+    out = []
+    for r in rows:
+        c = int(r.get("contribution", 0) or 0)
+        base = c // months
+        amounts = [base] * months
+        amounts[-1] += c - base * months
+        out.append({**r, "monthly": amounts})
+    return out
+
+
+def dc_return_stats(rows: List[Dict]):
+    """운용현황 — 적립원금·평가액이 있는 가입자의 수익률과 전체 가중평균 수익률.
+
+    반환: (rows_with_rate, avg_return|None, total_principal, total_value)
+    """
+    have = []
+    tp = tv = 0.0
+    for r in rows:
+        p, v = r.get("principal"), r.get("value")
+        if p and v and p > 0:
+            rr = v / p - 1.0
+            have.append({**r, "return_rate": rr})
+            tp += p
+            tv += v
+    avg = (tv / tp - 1.0) if tp else None
+    return have, avg, tp, tv
+
+
+def _row_view(r: Dict) -> Dict:
+    return {"사번": r["emp_id"], "소속": r.get("dept", ""), "연간임금": r.get("wage") or 0,
+            "재직일수": r.get("days", 0), "납부액(부담금)": r.get("contribution", 0),
+            "금융기관": r.get("bank", ""), "은행코드": r.get("bank_code", ""),
+            "계좌번호": r.get("account", "")}
+
+
+def build_dc_template() -> bytes:
+    """DC 가입자·계좌 명부 표준 양식(작성요령 + 헤더 + 예시) xlsx."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "작성요령"
+    ws.column_dimensions["A"].width = 92
+    ws["A1"] = "[DC 가입자·계좌 명부] 작성요령"
+    ws["A1"].font = Font(name="맑은 고딕", size=13, bold=True, color="1F4E79")
+    for i, line in enumerate([
+        "· 가입자 1인 1행. 사번(회사 임의번호)만 사용 — 실명·주민번호 금지.",
+        "· 연간임금총액: 대상연도 임금총액(원). 부담금 = 연간임금총액 × 1/12(법정 최소).",
+        "· 금융기관·은행코드·계좌번호: 인별 납부 대상 계좌(IRP/DC). 계좌번호는 '-' 포함 그대로 입력.",
+        "· 입사일자/퇴사일자: 연중 입·퇴사자는 재직일수(또는 재직월수)로 자동 일할. 계속 재직자는 퇴사일 비움.",
+        "· 가감률(선택): 규정상 가감이 있으면 계수 입력(예 1.1). 비우면 전역 가감률 적용.",
+        "· 적립원금·평가액(선택): 입력하면 운용현황(수익률) 탭에서 인별·전체 수익률을 계산합니다.",
+        "· 납부상태(선택): '납부완료/미납' 등. 미납/체납 관리 탭 기본값으로 사용됩니다.",
+        "· 올리면 인별 부담금·납부 계좌 명세서가 자동 생성됩니다(자료는 저장하지 않고 처리).",
+    ], start=3):
+        c = ws.cell(row=i, column=1, value=line)
+        c.font = Font(name="맑은 고딕", size=10)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws2 = wb.create_sheet("가입자명부")
+    headers = ["사원번호", "소속", "연간임금총액", "금융기관", "은행코드", "계좌번호",
+               "입사일자", "퇴사일자", "가감률", "적립원금", "평가액", "납부상태"]
+    fill = PatternFill("solid", fgColor="DCE6F1")
+    hf = Font(name="맑은 고딕", size=10, bold=True)
+    for j, h in enumerate(headers, start=1):
+        cell = ws2.cell(row=1, column=j, value=h)
+        cell.font = hf
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center")
+        ws2.column_dimensions[chr(64 + j) if j <= 26 else "AA"].width = 15
+    for i, ex in enumerate([
+        ("A001", "생산", 42_000_000, "OO은행", "011", "123-456-7890", 20200301, None,
+         None, 32_000_000, 34_100_000, "납부완료"),
+        ("A002", "관리", 36_000_000, "OO증권", "238", "999-88-77665", 20180101, None,
+         None, 28_000_000, 29_050_000, "납부완료"),
+        ("A003", "영업", 30_000_000, "OO은행", "011", "111-222-33344", 20250401, None,
+         None, 1_500_000, 1_560_000, "미납"),
+    ], start=2):
+        for j, v in enumerate(ex, start=1):
+            if v is not None:
+                ws2.cell(row=i, column=j, value=v)
+    ws2.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def build_dc_payment_xlsx(rows: List[Dict], summary: Dict, company: str, plan_year: int,
+                          biz_no: Optional[str] = None, due_date: Optional[str] = None) -> bytes:
+    """인별 납부명세서 xlsx — 계좌별 납부액 목록 + 합계(은행 이체·회계 반영용).
+
+    biz_no: 사업장관리번호, due_date: 납부기한(문자열) — 있으면 상단에 표기.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DC납부명세서"
+    ws["A1"] = f"{company}  {plan_year}년 DC 부담금 납부명세서"
+    ws["A1"].font = Font(name="맑은 고딕", size=13, bold=True, color="1F4E79")
+    meta = f"가입자 {summary['n']}명 · 총 납부액 {summary['total']:,.0f}원 · 부담금비율 1/{summary['denom']}"
+    if biz_no:
+        meta += f" · 사업장관리번호 {biz_no}"
+    if due_date:
+        meta += f" · 납부기한 {due_date}"
+    ws["A2"] = meta
+    ws["A2"].font = Font(name="맑은 고딕", size=10)
+
+    fill = PatternFill("solid", fgColor="DCE6F1")
+    hf = Font(name="맑은 고딕", size=10, bold=True)
+    for j, h in enumerate(COLUMNS, start=1):
+        cell = ws.cell(row=4, column=j, value=h)
+        cell.font = hf
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center")
+        ws.column_dimensions[chr(64 + j)].width = 16
+    for i, r in enumerate(rows, start=5):
+        v = _row_view(r)
+        for j, h in enumerate(COLUMNS, start=1):
+            ws.cell(row=i, column=j, value=v[h])
+    total_row = 5 + len(rows)
+    ws.cell(row=total_row, column=1, value="합계").font = hf
+    ws.cell(row=total_row, column=COLUMNS.index("납부액(부담금)") + 1,
+            value=summary["total"]).font = hf
+    ws.freeze_panes = "A5"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

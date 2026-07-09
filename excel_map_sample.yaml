@@ -1,0 +1,11 @@
+# 기존 엑셀 결과 파일의 사번·DBO 컬럼 위치 매핑.
+# (엔진 결과 파일 컬럼은 기본값 사번/DBO, 시트 '개인별산출표'을 사용)
+
+emp_id_column: 사번        # 기존 엑셀의 사번 컬럼명
+dbo_column: 퇴직급여부채    # 기존 엑셀의 DBO 컬럼명
+sheet: null               # 특정 시트명 (null이면 첫 시트)
+
+# 엔진 결과 파일 컬럼 (기본값이 맞으면 생략 가능)
+engine_emp_id_column: 사번
+engine_dbo_column: DBO
+engine_sheet: 개인별산출표
