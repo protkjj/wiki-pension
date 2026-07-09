@@ -1,0 +1,10 @@
+# convention 탐색 그리드. 각 차원에 후보값 리스트를 지정하면
+# 모든 조합(데카르트 곱)을 계산해 기존 엑셀과의 일치율을 비교한다.
+# 지정하지 않은 차원은 base config(--config) 값을 그대로 사용.
+
+decrement_timing: [end_of_year, mid_year]
+salary_increase_timing: [start_of_year, mid_year, end_of_year]
+discount_timing: [end_of_year, mid_year]
+service_day_count: ["act/365", "act/365.25"]
+# retirement_rate_basis: [age, service]
+# csc_method: [one_year_slice, attained_minus_prior]

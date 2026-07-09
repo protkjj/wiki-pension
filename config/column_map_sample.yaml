@@ -1,0 +1,54 @@
+# 명부 컬럼 매핑 (고객별 한글 양식 → 표준 스키마).
+# 고객마다 컬럼명이 다르므로 별칭을 여러 개 지정할 수 있다.
+# 헤더는 정규화(줄바꿈·괄호설명 제거) 후 대조하므로 '성별(1:남자, 2:여자)' 같은
+# 주석형 헤더도 '성별' 별칭으로 매칭된다.
+
+columns:
+  emp_id: [사번, 사원번호, 직원번호, 사원코드]
+  birth_date: [생년월일, 생일]
+  gender: [성별]
+  hire_date: [입사일, 입사일자]
+  base_salary: [기준급여, 월평균임금, 평균임금]
+  current_year_accrual: [당년도추계액, 추계액, 당기추계액, 당년도퇴직금, 당년도퇴직금추계액]
+  next_year_accrual: [차년도추계액, 차기추계액, 익년도추계액, 차년도퇴직금, 차년도퇴직금추계액]
+  ifrs_enrolled: [IFRS가입, IFRS가입여부, IFRS, IFRS적용]
+  emp_class: [종업원구분, 직군, 구분, 직종, 직종구분]
+  interim_settlement_date: [중간정산기준일, 중간정산일]
+  interim_settlement_amount: [중간정산액, 중간정산금액]
+  plan_type: [제도구분, 평가구분]
+  multiplier: [적용배수, 배수]
+
+# 값 매핑 (선택): 한글/숫자 코드값을 표준값으로.
+values:
+  gender:
+    남: M
+    여: F
+    남성: M
+    여성: F
+    남자: M
+    여자: F
+    "1": M          # 1: 남자
+    "2": F          # 2: 여자
+  emp_class:
+    임원: EXECUTIVE
+    정규직: REGULAR
+    계약직: CONTRACT
+    직원: REGULAR
+    "1": REGULAR    # 1: 직원
+    "2": REGULAR    # 2: 정규직 규정 적용
+    "3": EXECUTIVE  # 3: 임원
+    "4": CONTRACT   # 4: 계약직
+    "6": EXECUTIVE  # 6: 임원(PUC)
+    "7": CONTRACT   # 7: 계약직(PUC)
+  plan_type:
+    DB정상: 1
+    정상평가: 1
+    간편법: 2
+    제외: 3
+  ifrs_enrolled:
+    예: Y
+    아니오: N
+    가입: Y
+    미가입: N
+    y: Y
+    n: N

@@ -1,0 +1,10 @@
+# DBO 플랫폼(Streamlit) 배포 의존성 — Streamlit Community Cloud용.
+# 진입점: dbo-engine/app/platform_app.py (이 파일과 같은 폴더 → 루트 requirements보다 우선)
+streamlit>=1.44          # width="stretch"·container(height=)·vertical_alignment 등 최신 API 필요
+pandas>=2.0
+numpy>=1.24
+pydantic>=2.0
+pyyaml>=6.0
+openpyxl>=3.1
+python-pptx>=0.6.21
+xlrd>=2.0          # 구형 .xls 명부 읽기
