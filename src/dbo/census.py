@@ -42,6 +42,50 @@ REQUIRED_COLUMNS = [
 # 표준 스키마 전체 필드(계산에 사용하는 컬럼). 이 밖의 컬럼은 계산에 불필요.
 STANDARD_FIELDS = list(Employee.model_fields.keys())
 
+# 내부 필드명(영문) → 사용자가 이해하는 명부 컬럼명(한글).
+# 오류 메시지에 plan_type 같은 시스템 용어 대신 '제도구분'처럼 실제 컬럼명을 노출한다.
+FIELD_LABELS = {
+    "emp_id": "사원번호",
+    "birth_date": "생년월일",
+    "gender": "성별",
+    "hire_date": "입사일자",
+    "base_salary": "기준급여",
+    "current_year_accrual": "당년도퇴직금추계액",
+    "next_year_accrual": "차년도퇴직금추계액",
+    "emp_class": "종업원구분",
+    "interim_settlement_date": "중간정산기준일",
+    "interim_settlement_amount": "중간정산액",
+    "plan_type": "제도구분",
+    "multiplier": "적용배수",
+    "ifrs_enrolled": "IFRS가입",
+}
+
+# 필드별로 값이 잘못됐을 때 사용자에게 보여줄 '올바른 입력값' 안내(허용값 힌트).
+_FIELD_INPUT_HINT = {
+    "gender": "남자는 1, 여자는 2로 입력하세요.",
+    "emp_class": "일반직 1, 임원 3, 계약직 4로 입력하세요.",
+    "plan_type": "구분이 없으면 비워두거나 1, 간편법은 2, 제외는 3으로 입력하세요.",
+    "birth_date": "yyyymmdd 형식으로 입력하세요 (예: 19900101).",
+    "hire_date": "yyyymmdd 형식으로 입력하세요 (예: 20200101).",
+    "interim_settlement_date": "yyyymmdd 형식으로 입력하세요 (예: 20230101).",
+    "base_salary": "숫자(원)만 입력하세요.",
+    "current_year_accrual": "숫자(원)만 입력하세요.",
+    "next_year_accrual": "숫자(원)만 입력하세요.",
+    "interim_settlement_amount": "숫자(원)만 입력하세요.",
+}
+
+
+def _friendly_parse_message(loc: str, raw_value) -> str:
+    """파싱/검증 오류를 사용자용 한글 메시지로 변환.
+
+    시스템 필드명(plan_type 등) 대신 명부 컬럼명(제도구분)을 쓰고,
+    허용값 힌트를 덧붙여 기업 담당자가 바로 고칠 수 있게 한다.
+    """
+    label = FIELD_LABELS.get(loc, loc)
+    shown = "빈칸" if raw_value is None or raw_value == "" else f"'{raw_value}'"
+    hint = _FIELD_INPUT_HINT.get(loc, "입력값을 확인해 주세요.")
+    return f"[{label}] 입력값 {shown}을(를) 확인해 주세요 — {hint}"
+
 # 업로드 금지/불필요 민감 컬럼 패턴 (부분일치, 소문자 기준).
 # (키워드들, 라벨, 안내메시지) — 실명·주민번호는 반드시 제거, 나머지는 불필요 정보.
 SENSITIVE_PATTERNS = [
@@ -141,10 +185,19 @@ class ValidationReport(BaseModel):
 
 
 def _read_dataframe(path: Union[str, Path]) -> pd.DataFrame:
-    """xlsx/csv 명부 파일을 DataFrame으로 읽는다."""
+    """xlsx/csv 명부 파일을 DataFrame으로 읽는다.
+
+    양식에 '작성요령' 안내 시트가 포함되어 있어도(사용자가 그대로 업로드해도)
+    작성요령 시트는 건너뛰고 실제 명부(데이터) 시트만 읽는다.
+    """
     path = Path(path)
     if path.suffix.lower() in {".xlsx", ".xls"}:
-        return pd.read_excel(path)
+        xls = pd.ExcelFile(path)
+        sheet = next(
+            (s for s in xls.sheet_names if "요령" not in str(s)),
+            xls.sheet_names[0],
+        )
+        return xls.parse(sheet)
     if path.suffix.lower() == ".csv":
         return pd.read_csv(path)
     raise ValueError(f"지원하지 않는 명부 파일 형식: {path.suffix}")
@@ -297,10 +350,11 @@ def records_from_dataframe(
         except ValidationError as exc:
             for err in exc.errors():
                 loc = ".".join(str(p) for p in err["loc"])
+                field = str(err["loc"][0]) if err["loc"] else loc
                 report.add(
                     rule=f"parse:{loc}",
                     severity=Severity.ERROR,
-                    message=f"필드 파싱/검증 실패 ({loc}): {err['msg']}",
+                    message=_friendly_parse_message(field, clean.get(field)),
                     emp_id=emp_id_str,
                     row=int(row_idx),
                 )
