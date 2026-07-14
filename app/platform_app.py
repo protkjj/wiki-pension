@@ -2377,23 +2377,7 @@ def _plan_readonly(company_id):
         ("중간정산 허용", "예" if pi.get("interim_allowed") else "아니오"),
         ("중간정산 주기", pi.get("interim_cycle")),
     ])
-    _disc = d.get("discount_basis")
-    if _disc == "기타" and d.get("discount_basis_other"):
-        _disc = f"기타({d['discount_basis_other']})"
-    tbl("③ 할인율 및 사외적립비율", [
-        ("할인율 산출기준", _disc),
-        ("사외적립자산 적립비율(%)", pi.get("funding_ratio")),
-    ])
-    tbl("④ 임금인상률", [
-        ("임금체계", d.get("salary_system")),
-        ("고객제안 인상율(%)", d.get("baseup_proposed")),
-    ])
-    if d.get("baseup") and any(d["baseup"].values()):
-        st.caption("과거 5년 Base-up(%)")
-        st.dataframe(pd.DataFrame([d["baseup"]]), width="stretch", hide_index=True)
-    if d.get("baseup_by_group"):
-        st.caption("직군별 임금인상률(%)")
-        st.dataframe(pd.DataFrame(d["baseup_by_group"]), width="stretch", hide_index=True)
+    # 할인율·사외적립비율·임금인상율은 '③ 기초율 조회'에서 확인(중복 제거)
     if pi.get("notes"):
         st.caption(f"특이사항: {pi['notes']}")
     for f in store.list_aux_census(DB_PATH, company_id, "누진제규정서류"):
