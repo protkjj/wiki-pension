@@ -3123,7 +3123,7 @@ def _actuary_work_detail(user, sid):
         _plan_readonly(_cid)
     with st.expander("② 📁 명부조회 (산출 기본정보·오류·재업로드)", expanded=False):
         _actuary_census_view(user, sub, sid)
-    with st.expander("③ 📊 기초율 조회 (할인율·임금인상율·경험기초율·사외적립율)", expanded=False):
+    with st.expander("③ 📊 기업 제공 기초율 (할인율·임금인상율·경험기초율·사외적립율)", expanded=False):
         _actuary_basis_readonly(_cid)
     with st.expander("④ 🎖 기타장기", expanded=False):
         _client_other_lt(user, company_id=_cid, kp="act_")
@@ -3159,10 +3159,12 @@ def _actuary_work_detail(user, sid):
                "아래에서 계리사가 변경할 수 있습니다.")
     c1, c2, c3, c4 = st.columns(4)
     val_date = c1.date_input("산출기준일", dt.date.fromisoformat(sub["valuation_date"]))
-    discount = c2.number_input("할인율 (%)", value=4.5, step=0.1,
-                               help=f"기업 선택 할인율 기준: {_disc_basis} (등급→시장수익률은 계리사가 입력)") / 100
-    salary = c3.number_input("임금상승율 (%)", value=float(_sal_default), step=0.1,
-                             help="기업이 입력한 임금인상율(제안 또는 과거5년 평균)이 기본값입니다.") / 100
+    discount = c2.number_input("적용 할인율 (%)", value=4.5, step=0.1,
+                               help=f"기업 제공 할인율 기준: {_disc_basis} (등급→시장수익률은 계리사가 입력). "
+                                    "계리사가 실제 적용할 할인율입니다.") / 100
+    salary = c3.number_input("적용 임금상승율 (%)", value=float(_sal_default), step=0.1,
+                             help="기업 제공 임금인상율(제안 또는 과거5년 평균)이 기본값. "
+                                  "계리사가 실제 적용할 임금상승율입니다.") / 100
     ret_age = c4.number_input("정년", value=_ret_default, step=1)
     _tcur = _plan_timing(sub["company_id"])
     timing_lbl = st.radio("탈퇴·지급 시점 (할인 기준)", TIMING_OPTS,
