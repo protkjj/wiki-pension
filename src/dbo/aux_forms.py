@@ -48,6 +48,170 @@ def _extract_sheet(sheet_name: str):
 def _to_bytes(wb) -> bytes:
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
+
+# ===========================================================================
+# 할인율(회사채 등급·만기 공시금리) 업로드 양식
+# ===========================================================================
+DISCOUNT_RATINGS = ["AAA", "AA+", "AA0", "AA-", "A+", "A0"]
+
+
+def _rate_val(v):
+    """'3.16%' · '3.16' · 0.0316 → 소수(0.0316). 1보다 크면 %로 간주."""
+    if v is None or v == "":
+        return None
+    try:
+        x = float(str(v).replace("%", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if x <= 0:
+        return None
+    return x / 100 if x > 1 else x
+
+
+def build_discount_upload_template(max_maturity: int = 20) -> bytes:
+    """할인율 관리 업로드 양식 — 기준일 + 등급별(만기·할인율) 와이드 표."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "할인율"
+    ws["A1"] = "기준일(YYYYMM 또는 YYYY-MM-DD)"
+    ws["A1"].font = _BOLD
+    ws["B1"] = ""
+    ws["B1"].fill = _GREEN
+    ws["A1"].alignment = _LEFT
+    ws.column_dimensions["A"].width = 30
+
+    for idx, rating in enumerate(DISCOUNT_RATINGS):
+        c0 = 1 + idx * 3            # 등급마다 3칸(만기·할인율·공백) 간격
+        hdr = ws.cell(row=3, column=c0, value=f"회사채 {rating}")
+        hdr.font = _BOLD; hdr.fill = _HEAD; hdr.alignment = _CEN
+        ws.merge_cells(start_row=3, start_column=c0, end_row=3, end_column=c0 + 1)
+        m = ws.cell(row=4, column=c0, value="만기"); m.font = _BOLD; m.fill = _HEAD; m.alignment = _CEN
+        r = ws.cell(row=4, column=c0 + 1, value="할인율"); r.font = _BOLD; r.fill = _HEAD; r.alignment = _CEN
+        ws.column_dimensions[chr(64 + c0)].width = 8
+        ws.column_dimensions[chr(64 + c0 + 1)].width = 10
+        for k in range(1, max_maturity + 1):
+            ws.cell(row=4 + k, column=c0, value=k).alignment = _CEN
+            gc = ws.cell(row=4 + k, column=c0 + 1); gc.fill = _GREEN
+    ws.freeze_panes = "A5"
+    return _to_bytes(wb)
+
+
+def parse_discount_upload(source: Union[str, bytes]) -> Dict:
+    """할인율 업로드(와이드) 파싱 → {'기준일': str|None, 'curves': {등급: [{maturity,rate}]}}."""
+    ws = _open_first_sheet(source)
+    grid = [list(r) for r in ws.iter_rows(values_only=True)]
+
+    def _looks_like_date(v) -> Optional[str]:
+        if isinstance(v, (int, float)) and 190000 < v < 99999999:
+            return str(int(v))
+        if isinstance(v, str):
+            s = v.replace("-", "").replace(".", "").replace("/", "").strip()
+            if s.isdigit() and (6 <= len(s) <= 8) and s[:4].isdigit() and 1900 < int(s[:4]) < 2100:
+                return v.strip()
+        return None
+
+    base_date = None
+    for row in grid[:6]:
+        for j, c in enumerate(row or []):
+            if c is not None and "기준일" in _norm(c):
+                for v in (row[j + 1:] if j + 1 < len(row) else []):
+                    if v not in (None, ""):
+                        base_date = str(v).strip()
+                        break
+            # 값이 라벨 없이 202512 · 2025-12-31 같은 형태로만 있을 때
+            if base_date is None:
+                cand = _looks_like_date(c)
+                if cand:
+                    base_date = cand
+        if base_date:
+            break
+
+    # 등급 헤더 위치 탐색 (회사채 A0 등)
+    rating_norm = {_norm(r): r for r in DISCOUNT_RATINGS}
+    headers = []   # (row, col, rating)
+    for ridx, row in enumerate(grid[:8]):
+        for cidx, c in enumerate(row or []):
+            if c is None:
+                continue
+            n = _norm(c).replace("회사채", "")
+            if n in rating_norm:
+                headers.append((ridx, cidx, rating_norm[n]))
+
+    curves: Dict[str, List[dict]] = {}
+    for (hr, hc, rating) in headers:
+        # 헤더 아래에서 '만기'/'할인율' 서브헤더 행 찾기
+        sub_r = None
+        for x in range(hr + 1, min(hr + 4, len(grid))):
+            if hc < len(grid[x]) and _norm(grid[x][hc]) == "만기":
+                sub_r = x
+                break
+        if sub_r is None:
+            sub_r = hr + 1
+        pts = []
+        for x in range(sub_r + 1, len(grid)):
+            row = grid[x]
+            mv = row[hc] if hc < len(row) else None
+            rv = row[hc + 1] if hc + 1 < len(row) else None
+            try:
+                mm = int(float(str(mv).strip()))
+            except (TypeError, ValueError):
+                continue
+            rr = _rate_val(rv)
+            if rr is not None:
+                pts.append({"maturity": mm, "rate": rr})
+        if pts:
+            curves[rating] = sorted(pts, key=lambda p: p["maturity"])
+    return {"기준일": base_date, "curves": curves}
+
+
+def build_simple_curve_template(max_maturity: int = 20) -> bytes:
+    """전기 할인율 업로드용 단순 양식 — 만기 · 할인율 2열."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "할인율"
+    ws["A1"] = "만기"; ws["B1"] = "할인율"
+    for cell in ("A1", "B1"):
+        ws[cell].font = _BOLD; ws[cell].fill = _HEAD; ws[cell].alignment = _CEN
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 12
+    for k in range(1, max_maturity + 1):
+        ws.cell(row=1 + k, column=1, value=k).alignment = _CEN
+        ws.cell(row=1 + k, column=2).fill = _GREEN
+    ws.freeze_panes = "A2"
+    return _to_bytes(wb)
+
+
+def parse_simple_curve(source: Union[str, bytes]) -> List[dict]:
+    """단순 2열(만기·할인율) 업로드 → [{maturity, rate}]. 전기 할인율 업로드용."""
+    ws = _open_first_sheet(source)
+    grid = [list(r) for r in ws.iter_rows(values_only=True)]
+    # 만기/할인율 헤더 열 찾기
+    mcol = rcol = None
+    hdr_row = 0
+    for ridx, row in enumerate(grid[:6]):
+        for cidx, c in enumerate(row or []):
+            n = _norm(c)
+            if n in ("만기", "만기년", "maturity"):
+                mcol = cidx; hdr_row = ridx
+            if n in ("할인율", "금리", "rate", "수익률"):
+                rcol = cidx
+        if mcol is not None and rcol is not None:
+            break
+    if mcol is None or rcol is None:
+        mcol, rcol, hdr_row = 0, 1, 0     # 헤더 없으면 1·2열로 가정
+    pts = []
+    for row in grid[hdr_row + 1:]:
+        mv = row[mcol] if mcol < len(row) else None
+        rv = row[rcol] if rcol < len(row) else None
+        try:
+            mm = int(float(str(mv).strip()))
+        except (TypeError, ValueError):
+            continue
+        rr = _rate_val(rv)
+        if rr is not None:
+            pts.append({"maturity": mm, "rate": rr})
+    return sorted(pts, key=lambda p: p["maturity"])
+
 # 녹색(입력) 칸 · 헤더 스타일 -------------------------------------------------
 _GREEN = PatternFill("solid", fgColor="E2EFDA")     # 입력칸(녹색)
 _HEAD = PatternFill("solid", fgColor="DCE6F1")       # 헤더(연파랑)
