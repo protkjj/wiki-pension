@@ -2534,6 +2534,21 @@ def _render_result_blocks(res):
         else:
             st.caption("전기 계리자료(지난보고서 등록)가 있으면 전기 대비 증감을 표시합니다.")
 
+    # ── 전기가정 비교 (가정변경 효과: 동일 명부·전기 임금상승율·전기 할인율) ──
+    pa = m.get("prior_assumption")
+    if pa and pa.get("pbo"):
+        st.markdown("##### 🔁 전기가정 비교 (가정변경 효과)")
+        st.caption("동일 명부에 **전기 임금상승율·전기 할인율**을 적용한 PBO와 당기가정 PBO의 차이 "
+                   "— 가정(할인율·임금상승율) 변경이 부채에 미친 효과입니다.")
+        pap = pa["pbo"]
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("당기가정 PBO", eok(pbo),
+                   help=f"적용 할인율 {m.get('disc_rate', 0)*100:.2f}% · 임금상승율 {m.get('salary_rate', 0)*100:.2f}%")
+        pc2.metric("전기가정 PBO", eok(pap),
+                   help=f"전기 할인율 {pa['discount']*100:.2f}% · 전기 임금상승율 {pa['salary']*100:.2f}%")
+        pc3.metric("가정변경 효과", eok(pbo - pap),
+                   delta=f"{(pbo/pap - 1)*100:+.1f}%" if pap else None)
+
     # ── 사용 기초율(감사추적 · 스냅샷 보존) ──
     br = m.get("base_rates")
     if br:
@@ -2766,7 +2781,10 @@ def _actuary_experience_rates(user, exp_stat):
         } for s in ex_sets]), width="stretch", hide_index=True)
         dsel = st.selectbox("경험세트 삭제", [0] + [s["id"] for s in ex_sets],
                             format_func=lambda i: "선택 안함" if i == 0 else f"[{i}]", key="exp_del_sel")
-        if dsel and st.button("🗑 선택 경험세트 삭제", key="exp_del"):
+        _exp_used = bool(dsel) and store.base_rate_set_in_use(DB_PATH, dsel)
+        if _exp_used:
+            st.caption("🔒 이 경험세트는 산출에 사용된 이력이 있어 삭제할 수 없습니다.")
+        if dsel and st.button("🗑 선택 경험세트 삭제", key="exp_del", disabled=_exp_used):
             store.delete_base_rate_set(DB_PATH, dsel)
             st.rerun()
 
@@ -2839,7 +2857,10 @@ def _actuary_dev_rates(user):
             rows = []
         st.dataframe(_rates_display_df(rows),
                      width="stretch", hide_index=True, height=280)
-        if st.button("🗑 이 세트 삭제", key="br_del"):
+        _set_used = store.base_rate_set_in_use(DB_PATH, sel)
+        if _set_used:
+            st.caption("🔒 이 세트는 산출에 사용된 이력이 있어 삭제할 수 없습니다(감사 추적 보존).")
+        if st.button("🗑 이 세트 삭제", key="br_del", disabled=_set_used):
             store.delete_base_rate_set(DB_PATH, sel)
             st.rerun()
 
@@ -2849,96 +2870,85 @@ DC_RATINGS = ["AA+", "AA", "AA-", "국공채", "기타"]
 
 
 def _actuary_discount(user):
-    st.subheader("할인율 관리")
-    st.caption("만기별 할인율(회사채 spot 커브)을 입력하면 **부채 현금흐름에 대해 "
-               "듀레이션이 반영된 단일할인율**을 산출합니다. "
-               "(커브로 할인한 부채 PV = 단일율로 할인한 PV 가 되는 flat rate)")
+    st.subheader("할인율 관리 — 연도별 공시 회사채 등급별·만기별 금리")
+    st.caption("금융투자협회 채권정보센터(KOFIA)·채권평가사가 **보고기간말 공시한 회사채 등급별·만기별 "
+               "수익률**을 입력·관리합니다. 여기 등록한 커브를 **부채 산출**에서 선택하면, 그 명부의 "
+               "현금흐름에 대해 **단일율 / 듀레이션 적용** 할인율로 자동 환산됩니다. "
+               "(할인율은 연도·등급별로 만기 커브 단위로 저장합니다.)")
 
-    c1, c2, c3, c4 = st.columns(4)
-    name = c1.text_input("커브 명칭", placeholder="예: 2025-12-31 AA+", key="dc_name")
-    vdate = c2.text_input("기준일", placeholder="2025-12-31", key="dc_vdate")
-    rating = c3.selectbox("등급", DC_RATINGS, key="dc_rating")
-    period = c4.selectbox("당기/전기", BR_PERIODS, key="dc_period")
-    timing_lbl = st.radio("할인 시점", TIMING_OPTS, horizontal=True, key="dc_timing")
-    timing = "end_of_year" if "연말" in timing_lbl else "mid_year"
+    st.markdown("**① 작성양식 다운로드 → 작성 후 업로드**")
+    st.download_button("📄 할인율 업로드 양식 다운로드", AF.build_discount_upload_template(),
+                       file_name="할인율_업로드양식.xlsx", key="dc_tmpl")
+    st.caption("양식 맨 위 **기준일**(예: 202512)을 채우면 그 날짜로 버전 저장됩니다. "
+               "당기/전기 구분은 여기서 하지 않고, 산출 화면에서 어떤 기준일 커브를 쓸지 선택합니다.")
+    up = st.file_uploader("작성한 할인율 양식 업로드 (기준일 + 등급별 만기·할인율)", type=["xlsx"], key="dc_up")
+    if up is not None:
+        try:
+            parsed = AF.parse_discount_upload(bytes(up.getbuffer()))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"양식을 읽을 수 없습니다: {e}")
+            parsed = None
+        if parsed:
+            _valid = {r: p for r, p in parsed["curves"].items() if len(p) >= 2}
+            if not _valid:
+                st.warning("등급별 만기·할인율을 2개 이상 채워 다시 올려주세요.")
+            else:
+                st.markdown(f"**미리보기** — 감지된 등급: {', '.join(_valid)}")
+                _bd = st.text_input("기준일 (엑셀에서 감지 · 필요 시 수정)",
+                                    value=str(parsed.get("기준일") or ""),
+                                    placeholder="예: 202512 또는 2025-12-31", key="dc_bdate_confirm")
+                if st.button("✅ 이 기준일로 등록", type="primary", key="dc_up_save"):
+                    bdate = _bd.strip()
+                    if not bdate:
+                        st.error("기준일을 입력하세요 (예: 202512).")
+                    else:
+                        for rating, pts in _valid.items():
+                            store.add_discount_curve(
+                                DB_PATH, f"{bdate} {rating}", bdate, rating, "",
+                                json.dumps(pts, ensure_ascii=False), None, None, "",
+                                user["id"], now())
+                        st.success(f"✅ 기준일 **{bdate}** · {len(_valid)}개 등급 커브를 등록했습니다.")
+                        st.rerun()
 
-    st.markdown("**① 만기별 할인율(spot 커브)** — 만기(년)·할인율(예 0.03123)")
-    curve_df = st.data_editor(
-        pd.DataFrame({"만기": list(range(1, 21)), "할인율": [None] * 20}),
-        num_rows="dynamic", width="stretch", key="dc_curve", height=280)
-
-    st.markdown("**② 부채 예상지급액(현금흐름)** — 연도·예상지급액 "
-                "(만기분석/엑셀에서 붙여넣기; 단일할인율은 현금흐름 '형태'로 결정)")
-    cf_df = st.data_editor(
-        pd.DataFrame({"연도": list(range(1, 21)), "예상지급액": [None] * 20}),
-        num_rows="dynamic", width="stretch", key="dc_cf", height=280)
-
-    def _curve_dict():
-        out = {}
-        for _, r in curve_df.iterrows():
-            try:
-                m = int(r["만기"]); v = float(r["할인율"])
-                if v > 0:
-                    out[m] = v
-            except (TypeError, ValueError):
-                continue
-        return out
-
-    def _cashflows():
-        out = []
-        for _, r in cf_df.iterrows():
-            try:
-                y = int(r["연도"]); a = float(r["예상지급액"])
-                if a:
-                    out.append((y, a))
-            except (TypeError, ValueError):
-                continue
-        return out
-
-    res = None
-    if st.button("🧮 단일할인율 산출", type="primary", key="dc_solve"):
-        curve = _curve_dict(); cf = _cashflows()
-        if len(curve) < 2:
-            st.error("만기별 할인율을 2개 이상 입력하세요.")
-        elif len(cf) < 2:
-            st.error("부채 예상지급액(현금흐름)을 2개 이상 입력하세요.")
-        else:
-            res = DISC.solve(cf, curve, timing)
-            st.session_state["dc_res"] = res
-            st.session_state["dc_res_curve"] = curve
-    res = res or st.session_state.get("dc_res")
-    if res:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("단일할인율", f"{res['single_rate']*100:.3f}%")
-        m2.metric("듀레이션(년)", f"{res['duration']:.2f}")
-        m3.metric("듀레이션 할인율", f"{res['duration_rate']*100:.3f}%")
-        m4.metric("커브 부채 PV", f"{res['curve_pv']:,.0f}")
-        if st.button("💾 커브·단일할인율 저장", key="dc_save"):
-            store.add_discount_curve(
-                DB_PATH, (name.strip() or f"{vdate} {rating}"), vdate, rating, period,
-                json.dumps([{"maturity": m, "rate": v} for m, v in
-                            sorted(st.session_state.get("dc_res_curve", {}).items())],
-                           ensure_ascii=False),
-                res["single_rate"], res["duration"], "", user["id"], now())
-            st.success("할인율 커브를 저장했습니다.")
-            st.rerun()
-
+    # ② 기준일(버전)별 조회 — 엑셀과 동일한 등급×만기 와이드 형식 + 삭제
     curves = store.list_discount_curves(DB_PATH)
-    st.markdown(f"**저장된 할인율 커브 ({len(curves)})**")
-    if curves:
-        st.dataframe(pd.DataFrame([{
-            "ID": c["id"], "명칭": c["name"], "기준일": c["valuation_date"], "등급": c["rating"],
-            "당기/전기": c["period_kind"],
-            "단일할인율(%)": round((c["single_rate"] or 0) * 100, 3),
-            "듀레이션": round(c["duration"] or 0, 2), "등록일": c["created"][:10],
-        } for c in curves]), width="stretch", hide_index=True)
-        dsel = st.selectbox("삭제할 커브", [c["id"] for c in curves],
-                            format_func=lambda i: next(f"[{c['id']}] {c['name']}"
-                                                       for c in curves if c["id"] == i),
-                            key="dc_delsel")
-        if st.button("🗑 커브 삭제", key="dc_del"):
-            store.delete_discount_curve(DB_PATH, dsel)
-            st.rerun()
+    st.markdown(f"**② 등록된 공시 금리 — 기준일(버전)별 관리 · 총 {len(curves)}개 커브**")
+    if not curves:
+        st.info("아직 등록된 공시 금리가 없습니다. 위 양식을 내려받아 작성·업로드하세요.")
+        return
+    _versions = sorted({c["valuation_date"] for c in curves}, reverse=True)
+    vpick = st.selectbox("기준일(버전) 선택", _versions,
+                         format_func=lambda v: f"기준일 {v}", key="dc_vpick")
+    _vcurves = [c for c in curves if c["valuation_date"] == vpick]
+    st.markdown(f"##### 📅 기준일 {vpick}  ·  등급 {len(_vcurves)}종")
+    st.caption("업로드 엑셀과 동일 형식 (행=만기, 열=등급)")
+    # 등급×만기 피벗 (엑셀 형식) — 당기/전기 표기 없이 등급만
+    wide = {}
+    all_mats = set()
+    for c in _vcurves:
+        full = store.get_discount_curve(DB_PATH, c["id"])
+        try:
+            pts = json.loads(full["curve_json"]) if full and full.get("curve_json") else []
+        except Exception:  # noqa: BLE001
+            pts = []
+        col = c["rating"]
+        wide[col] = {int(p["maturity"]): round(float(p["rate"]) * 100, 3) for p in pts}
+        all_mats.update(wide[col].keys())
+    if all_mats:
+        rows = [{"만기(년)": m, **{col: wide[col].get(m) for col in wide}}
+                for m in sorted(all_mats)]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420)
+    dsel = st.selectbox(
+        "삭제할 커브", [c["id"] for c in curves],
+        format_func=lambda i: next(
+            f"[{c['id']}] 기준일 {c['valuation_date']} · {c['rating']}"
+            for c in curves if c["id"] == i), key="dc_delsel")
+    _dsel_used = store.discount_curve_in_use(DB_PATH, dsel)
+    if _dsel_used:
+        st.caption("🔒 이 커브는 산출에 사용된 이력이 있어 삭제할 수 없습니다(감사 추적 보존).")
+    if st.button("🗑 선택 커브 삭제", key="dc_del", disabled=_dsel_used):
+        store.delete_discount_curve(DB_PATH, dsel)
+        st.rerun()
 
 
 def _actuary_edit_rows(user, sub, df, report, sid):
@@ -3070,6 +3080,64 @@ def _actuary_census_view(user, sub, sid):
                                    file_name=f["filename"], key=f"auxa_{f['id']}")
 
 
+def _build_discount_basis_xlsx(sub, curve_id, disc_method, timing, salary, ret_age, val_date):
+    """할인율 기초데이터 엑셀 — ①예상퇴직급여 지급액 ②단일율 찾기 산출근거.
+
+    이 명부의 현금흐름(만기분석)과 선택 커브로 단일율/듀레이션 할인율 산출 과정을 담는다.
+    현금흐름 산출용 기초율은 표준(CSV) 테이블 기준(단일율은 현금흐름 '형태'로 결정되므로 충분).
+    """
+    import io as _io
+    from openpyxl import Workbook
+    from dbo.engine import expected_cashflows
+    from dbo import discount as _D
+
+    records, _rep, _ = load_census(sub["stored_path"], column_map=COLMAP)
+    cfg = Config.from_dict({
+        "valuation_date": val_date.isoformat(), "discount_rate": 0.045,
+        "salary_increase_rate": salary, "retirement_age": ret_age,
+        "decrement_timing": timing, "discount_timing": timing})
+    tables = DecrementTables.from_config(cfg, base_dir=str(CONFIG_DIR))
+    cfdf = expected_cashflows(records, cfg, tables)
+    crow = store.get_discount_curve(DB_PATH, curve_id)
+    try:
+        curve = {int(x["maturity"]): float(x["rate"]) for x in json.loads(crow["curve_json"])}
+    except Exception:  # noqa: BLE001
+        curve = {}
+    cflist = [(int(r["연도"]), float(r["기대급여지급액"]))
+              for _, r in cfdf.iterrows() if r["기대급여지급액"]]
+    solved = (_D.solve(cflist, curve, timing)
+              if len(curve) >= 2 and len(cflist) >= 2 else None)
+
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "예상퇴직급여지급액"
+    ws1.append(["연도", "예상퇴직급여 지급액"])
+    for _, r in cfdf.iterrows():
+        ws1.append([int(r["연도"]), round(float(r["기대급여지급액"]))])
+
+    ws2 = wb.create_sheet("단일율 산출근거")
+    ws2.append([f"커브: {crow['name'] if crow else '-'} · 방법: {disc_method} · 시점: {timing}"])
+    ws2.append(["연도", "예상지급액(현금흐름)", "커브 spot금리(%)", "할인기간(년)",
+                "커브 할인계수", "커브 현재가치"])
+    for yr, cf in cflist:
+        sp = _D._spot(curve, yr) if curve else 0.0
+        exn = _D._exponent(yr, timing)
+        df = 1 / (1 + sp) ** exn if sp else 0.0
+        ws2.append([yr, round(cf), round(sp * 100, 4), round(exn, 2),
+                    round(df, 6), round(cf * df)])
+    if solved:
+        ws2.append([])
+        ws2.append(["단일할인율(%)", round(solved["single_rate"] * 100, 4)])
+        ws2.append(["듀레이션(년)", round(solved["duration"], 3)])
+        ws2.append(["듀레이션 할인율(%)", round(solved["duration_rate"] * 100, 4)])
+        ws2.append(["커브 부채 PV", round(solved["curve_pv"])])
+        _applied = solved["duration_rate"] if disc_method == "듀레이션 적용" else solved["single_rate"]
+        ws2.append(["→ 적용 할인율(%)", round(_applied * 100, 4)])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _actuary_work_detail(user, sid):
     sub = store.get_submission(DB_PATH, sid)
     st.subheader(f"2. [신청번호 {_apply_no(sub)}] {sub['company_name']} · 산출기준일 {sub['valuation_date']}")
@@ -3157,27 +3225,158 @@ def _actuary_work_detail(user, sid):
     st.caption(f"※ 기업 입력값 기준 — 할인율 산출기준: **{_disc_basis}** · "
                f"임금인상율(제안/평균): **{_sal_default:.2f}%** · 정년: **{_ret_default}세**. "
                "아래에서 계리사가 변경할 수 있습니다.")
+    _prior_rec = store.get_prior_record(DB_PATH, _cid) or {}
+    _prior_sal_default = float(_prior_rec.get("prior_salary_rate") or 0.0)
     c1, c2, c3, c4 = st.columns(4)
     val_date = c1.date_input("산출기준일", dt.date.fromisoformat(sub["valuation_date"]))
-    discount = c2.number_input("적용 할인율 (%)", value=4.5, step=0.1,
-                               help=f"기업 제공 할인율 기준: {_disc_basis} (등급→시장수익률은 계리사가 입력). "
-                                    "계리사가 실제 적용할 할인율입니다.") / 100
-    salary = c3.number_input("적용 임금상승율 (%)", value=float(_sal_default), step=0.1,
-                             help="기업 제공 임금인상율(제안 또는 과거5년 평균)이 기본값. "
-                                  "계리사가 실제 적용할 임금상승율입니다.") / 100
+    salary = c2.number_input("1. 적용 임금상승율 (%)", value=float(_sal_default), step=0.1,
+                             help="기업 제공 임금인상율(제안 또는 과거5년 평균)이 기본값. 계리사가 변경 가능.") / 100
+    prior_salary = c3.number_input("전기 임금상승율 (%)", value=_prior_sal_default, step=0.1,
+                                   key=f"priorsal_{sid}",
+                                   help="전기 평가 시 적용했던 임금상승율. 전기가정 PBO(가정변경 효과) 비교에 사용됩니다.") / 100
     ret_age = c4.number_input("정년", value=_ret_default, step=1)
     _tcur = _plan_timing(sub["company_id"])
     timing_lbl = st.radio("탈퇴·지급 시점 (할인 기준)", TIMING_OPTS,
                           index=(1 if _tcur == "end_of_year" else 0), horizontal=True,
                           key=f"timing_{sid}",
-                          help="연중(mid-year): 연중 탈퇴·지급 가정, 반기 할인 — 한국 실무 표준·기본값. "
-                               "/ 연말(end-of-year): 연말 시점 할인.")
+                          help="연중(mid-year): 한국 실무 표준·기본값 / 연말(end-of-year): 연말 시점 할인.")
     run_timing = "end_of_year" if "연말" in timing_lbl else "mid_year"
 
-    # 기초율 세트·할인율 커브 선택 (마스터 데이터 연동) — 이 회사 경험세트 + 공용 개발원세트
+    # 2. 적용 할인율 — 산출방법(단일율/듀레이션) + 당기/전기 커브
+    st.markdown("**2. 적용 할인율**")
+    _curves = store.list_discount_curves(DB_PATH)     # 당기/전기 구분 없이 전체(기준일·등급)
+    disc_method = st.radio("적용 할인율 산출 방법", ["단일율", "듀레이션 적용"], horizontal=True,
+                           key=f"discm_{sid}",
+                           help="단일율: 커브PV = 단일율PV 가 되는 flat rate. "
+                                "/ 듀레이션 적용: 듀레이션 시점의 커브 금리.")
+
+    def _curve_pts(cid):
+        crow = store.get_discount_curve(DB_PATH, cid) if cid else None
+        try:
+            return json.loads(crow["curve_json"]) if crow and crow.get("curve_json") else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _cashflows_cached():
+        ck = f"cf_{sid}_{salary:.5f}_{ret_age}_{run_timing}_{val_date.isoformat()}"
+        if ck in st.session_state:
+            return st.session_state[ck]
+        try:
+            from dbo.engine import expected_cashflows
+            _recs, _r, _ = load_census(sub["stored_path"], column_map=COLMAP)
+            _cfg0 = Config.from_dict({"valuation_date": val_date.isoformat(), "discount_rate": 0.045,
+                                      "salary_increase_rate": salary, "retirement_age": ret_age,
+                                      "decrement_timing": run_timing, "discount_timing": run_timing})
+            _tb = DecrementTables.from_config(_cfg0, base_dir=str(CONFIG_DIR))
+            _cfdf = expected_cashflows(_recs, _cfg0, _tb)
+            cfl = [(int(r["연도"]), float(r["기대급여지급액"]))
+                   for _, r in _cfdf.iterrows() if r["기대급여지급액"]]
+        except Exception:  # noqa: BLE001
+            cfl = []
+        st.session_state[ck] = cfl
+        return cfl
+
+    def _solve_pts(pts):
+        if not pts:
+            return None
+        curve = {int(p["maturity"]): float(p["rate"]) for p in pts}
+        cfl = _cashflows_cached()
+        if len(curve) >= 2 and len(cfl) >= 2:
+            return DISC.solve(cfl, curve, run_timing)
+        return None
+
+    def _show_curve(pts, label):
+        if not pts:
+            return None
+        cc1, cc2 = st.columns([1, 1])
+        cc1.caption(f"{label} 만기별 금리")
+        cc1.dataframe(pd.DataFrame([{"만기(년)": p["maturity"],
+                                     "할인율(%)": round(float(p["rate"]) * 100, 3)} for p in pts]),
+                      width="stretch", hide_index=True, height=180)
+        sol = _solve_pts(pts)
+        if sol:
+            applied = sol["duration_rate"] if disc_method == "듀레이션 적용" else sol["single_rate"]
+            cc2.metric(f"{label} 단일할인율", f"{sol['single_rate']*100:.3f}%")
+            cc2.caption(f"듀레이션 {sol['duration']:.2f}년 · 듀레이션율 {sol['duration_rate']*100:.3f}%\n\n"
+                        f"**→ 적용({disc_method}) {applied*100:.3f}%**")
+        return sol
+
+    _basis_rating = (_disc_basis or "").replace("회사채", "").strip()
+
+    def _resolve(vdate, rating):
+        return next((c["id"] for c in _curves
+                     if c["valuation_date"] == vdate and c["rating"] == rating), 0)
+
+    # ① 당기 할인율 — 기준일 + 등급 선택(등급 기본=기업 제공)
+    st.markdown("**① 당기 할인율** — 기준일·등급 선택 (엑셀에서 등급에 맞는 커브를 찾아 사용)")
+    curve_id = 0
+    if _curves:
+        _vers = sorted({c["valuation_date"] for c in _curves}, reverse=True)
+        d1, d2 = st.columns(2)
+        cur_ver = d1.selectbox("당기 기준일", _vers, format_func=lambda v: f"기준일 {v}", key=f"curver_{sid}")
+        _ratings = [c["rating"] for c in _curves if c["valuation_date"] == cur_ver]
+        _ri = _ratings.index(_basis_rating) if _basis_rating in _ratings else 0
+        cur_rating = d2.selectbox("당기 등급", _ratings, index=_ri, key=f"currt_{sid}",
+                                  help=f"기업 제공 할인율 기준등급 **{_basis_rating or '-'}** 이 기본 선택됩니다.")
+        curve_id = _resolve(cur_ver, cur_rating)
+        if _basis_rating and cur_rating == _basis_rating:
+            st.caption(f"✅ 기업 제공 등급({_basis_rating}) · 기준일 {cur_ver} 커브를 사용합니다.")
+        _show_curve(_curve_pts(curve_id), "당기")
+    else:
+        st.warning("‘할인율 관리’에 등록된 공시 금리가 없습니다. 상단 **할인율 관리**에서 먼저 등록하세요.")
+
+    # ② 전기 할인율 — 등록 커브 선택 또는 엑셀 업로드(양식 제공)
+    st.markdown("**② 전기 할인율** — 등록 커브 선택 또는 엑셀 업로드 (전기 대비 분석용)")
+    _pri_mode = st.radio("전기 할인율 방식", ["할인율 관리에서 선택", "엑셀 업로드"],
+                         horizontal=True, key=f"primode_{sid}")
+    prior_pts = None
+    if _pri_mode == "할인율 관리에서 선택":
+        if _curves:
+            _pvers = sorted({c["valuation_date"] for c in _curves}, reverse=True)
+            p1, p2 = st.columns(2)
+            pri_ver = p1.selectbox("전기 기준일", _pvers, format_func=lambda v: f"기준일 {v}", key=f"priver_{sid}")
+            _pr = [c["rating"] for c in _curves if c["valuation_date"] == pri_ver]
+            _pri = _pr.index(_basis_rating) if _basis_rating in _pr else 0
+            pri_rating = p2.selectbox("전기 등급", _pr, index=_pri, key=f"prirt_{sid}")
+            prior_pts = _curve_pts(_resolve(pri_ver, pri_rating))
+        else:
+            st.caption("등록된 커브가 없습니다. 엑셀 업로드를 이용하세요.")
+    else:
+        st.download_button("📄 전기 할인율 업로드 양식(만기·할인율)", AF.build_simple_curve_template(),
+                           file_name="전기할인율_양식.xlsx", key=f"pritmpl_{sid}")
+        _pf = st.file_uploader("전기 할인율 엑셀 업로드", type=["xlsx"], key=f"dcpriup_{sid}")
+        if _pf is not None:
+            try:
+                prior_pts = AF.parse_simple_curve(bytes(_pf.getbuffer()))
+                st.session_state[f"prior_pts_{sid}"] = prior_pts
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"전기 할인율 파일을 읽을 수 없습니다: {_e}")
+        prior_pts = prior_pts or st.session_state.get(f"prior_pts_{sid}")
+    _show_curve(prior_pts, "전기")
+
+    discount = 0.045      # 내부 기본값(커브 미선택 시 폴백). 화면 직접입력은 제거됨.
+
+    # ── 자동 산출 기초데이터 엑셀 다운로드 (①예상퇴직급여 지급액 ②단일율 산출근거) ──
+    st.markdown("**자동 산출 기초데이터 조회(엑셀)** — ① 예상퇴직급여 지급액 · ② 단일율 찾기 산출근거")
+    if not curve_id:
+        st.caption("당기 할인율 커브가 선택되면 기초데이터 엑셀을 생성할 수 있습니다.")
+    else:
+        if st.button("🧮 기초데이터 생성", key=f"dcdl_{sid}"):
+            try:
+                st.session_state[f"dcxls_{sid}"] = _build_discount_basis_xlsx(
+                    sub, curve_id, disc_method, run_timing, salary, ret_age, val_date)
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"기초데이터 생성 실패: {_e}")
+        _xls = st.session_state.get(f"dcxls_{sid}")
+        if _xls:
+            st.download_button("📥 할인율 기초데이터 엑셀 다운로드", _xls,
+                               file_name=f"할인율기초데이터_{sub['company_name']}_{sub['valuation_date']}.xlsx",
+                               key=f"dcdl2_{sid}")
+
+    # 기초율 세트 선택 (마스터 데이터 연동) — 이 회사 경험세트 + 공용 개발원세트
     _brsets = store.list_base_rate_sets(DB_PATH, company_id=sub["company_id"])
-    _dccurves = store.list_discount_curves(DB_PATH)
-    bcol, dcol = st.columns(2)
+    st.markdown("**3. 적용 기초율(탈퇴·사망·승급률)**")
+    bcol = st.container()
     # 적용 기초율 = (세트 + 300인 밴드)를 하나의 선택지로. 재직자수로 밴드 자동 세팅.
     _nrec = sub.get("n_records") or 0
     _auto_band = "ge300" if _nrec >= 300 else "lt300"
@@ -3224,12 +3423,6 @@ def _actuary_work_detail(user, sid):
         bcol.caption("📈 이 기업의 경험 기초율이 등록되어 있어 기본으로 선택되었습니다.")
     base_set_id = _optmap[_sel_key]["set_id"]
     size_band = _optmap[_sel_key]["band"]
-    _dcopts = {0: "직접입력(위 할인율 사용)"}
-    _dcopts.update({c["id"]: f"[{c['id']}] {c['name']} · 단일 {(c['single_rate'] or 0)*100:.3f}%"
-                    for c in _dccurves})
-    curve_id = dcol.selectbox("할인율 커브", list(_dcopts), format_func=lambda i: _dcopts[i],
-                              key=f"dcsel_{sid}",
-                              help="커브를 선택하면 이 명부의 현금흐름으로 듀레이션 반영 단일할인율을 자동 산출해 적용합니다.")
 
     # 주석공시 조정내역용 회사 재무자료 (사외적립자산·기여금·전기값·재측정손익)
     _dsv = store.get_disclosure_inputs(DB_PATH, sid) or {}
@@ -3273,6 +3466,10 @@ def _actuary_work_detail(user, sid):
     rc1, rc2 = st.columns([1, 2])
     run = rc1.button("🟨 계산 실행 (시뮬레이션)", type="primary", key=f"run_{sid}")
     force = rc2.checkbox("오류가 있어도 이대로 계산 (유효한 레코드만 사용)", key=f"force_{sid}")
+    if run and not curve_id:
+        st.error("**당기 할인율 커브**를 먼저 선택하세요 (할인율 관리에 등록된 기준일·등급). "
+                 "할인율이 정해져야 계산할 수 있습니다.")
+        run = False
     if run:
         _timing = run_timing
         records, report, _ = load_census(sub["stored_path"], column_map=COLMAP)
@@ -3284,13 +3481,20 @@ def _actuary_work_detail(user, sid):
                 "decrement_timing": _timing, "discount_timing": _timing,
             })
 
+        def _mkcfg_sal(sal, rate):
+            return Config.from_dict({
+                "valuation_date": val_date.isoformat(), "discount_rate": rate,
+                "salary_increase_rate": sal, "retirement_age": ret_age,
+                "decrement_timing": _timing, "discount_timing": _timing,
+            })
+
         # 기초율: 선택 세트 → DecrementTables (미선택 시 CSV 표준). 300인 밴드 반영.
         if base_set_id:
             tables = _tables_from_base_set(base_set_id, size_band)
         else:
             tables = DecrementTables.from_config(_mkcfg(discount), base_dir=str(CONFIG_DIR))
 
-        # 할인율: 커브 선택 시 이 명부 현금흐름으로 단일할인율 자동 산출
+        # 할인율: 커브 선택 시 이 명부 현금흐름으로 산출방법(단일율/듀레이션)에 따라 자동 산출
         disc_rate = discount
         if curve_id:
             from dbo.engine import expected_cashflows
@@ -3304,9 +3508,15 @@ def _actuary_work_detail(user, sid):
             cflist = [(int(r["연도"]), float(r["기대급여지급액"]))
                       for _, r in cfdf.iterrows() if r["기대급여지급액"]]
             if len(curve) >= 2 and len(cflist) >= 2:
-                disc_rate = DISC.single_equivalent_rate(cflist, curve, _timing)
-                st.info(f"할인율 커브 '{crow['name']}' 적용 → 듀레이션 반영 **단일할인율 "
-                        f"{disc_rate*100:.3f}%** 자동 산출 (직접입력 할인율 대신 사용)")
+                _solved = DISC.solve(cflist, curve, _timing)
+                if disc_method == "듀레이션 적용":
+                    disc_rate = _solved["duration_rate"]
+                    _mlbl = f"듀레이션({_solved['duration']:.2f}년) 적용 할인율"
+                else:
+                    disc_rate = _solved["single_rate"]
+                    _mlbl = "단일율(듀레이션 반영)"
+                st.info(f"할인율 커브 '{crow['name']}' · **{_mlbl} {disc_rate*100:.3f}%** "
+                        "자동 산출 (직접입력 할인율 대신 사용)")
             else:
                 st.warning("커브 또는 현금흐름이 부족해 직접입력 할인율을 사용합니다.")
 
@@ -3348,6 +3558,25 @@ def _actuary_work_detail(user, sid):
                                                ret_age, sub["company_id"])
             if base_set_id:
                 _metrics["base_rates"] = _base_set_snapshot(base_set_id, size_band)
+            # 전기가정 PBO — 전기 임금상승율 + 전기 할인율(단일율)로 동일 명부 재산출(가정변경 효과)
+            if prior_pts and len(prior_pts) >= 2:
+                try:
+                    from dbo.engine import expected_cashflows as _ecf
+                    _pcurve = {int(p["maturity"]): float(p["rate"]) for p in prior_pts}
+                    _pcfdf = _ecf(records, _mkcfg_sal(prior_salary, disc_rate), tables)
+                    _pcfl = [(int(r["연도"]), float(r["기대급여지급액"]))
+                             for _, r in _pcfdf.iterrows() if r["기대급여지급액"]]
+                    if len(_pcfl) >= 2:
+                        _psolved = DISC.solve(_pcfl, _pcurve, _timing)
+                        _pdisc = (_psolved["duration_rate"] if disc_method == "듀레이션 적용"
+                                  else _psolved["single_rate"])
+                        _pres = calculate_census(records, _mkcfg_sal(prior_salary, _pdisc),
+                                                 tables, with_detail=False)
+                        _metrics["prior_assumption"] = {
+                            "pbo": float(_pres.total_dbo), "salary": float(prior_salary),
+                            "discount": float(_pdisc)}
+                except Exception:  # noqa: BLE001
+                    pass
             store.save_result_metrics(DB_PATH, rid, _metrics)
             _ver = store.mark_calculated(DB_PATH, sid, now())
             # 검토요청/검토완료 건을 재계산하면 검토상태가 초기화됨 → 다음 렌더에서 안내
