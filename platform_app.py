@@ -47,8 +47,15 @@ from dbo import discount as DISC  # noqa: E402
 from dbo import experience as EXP  # noqa: E402
 from dbo import dc as DCX  # noqa: E402
 from dbo import census_review as CR  # noqa: E402
+from dbo import aux_forms as AF  # noqa: E402
 
 COLMAP = str(CONFIG_DIR / "column_map_sample.yaml")
+
+# 테스트 기간 간소화 모드 —
+#   메인(로그인) 화면: 제목 + 로그인만 노출(인트로 4대 기능 카드 숨김)
+#   기업 좌측 업무메뉴: 'IFRS 1019 부채관리'만 노출(ALM·재정검증·AI·DC·컨설팅 숨김)
+# 나머지 기능은 코드에 그대로 보존되며, False로 바꾸면 전체 화면이 복원된다.
+TEST_SIMPLE_MODE = True
 
 st.set_page_config(page_title="WIKI 퇴직연금 관리 시스템", page_icon="🏢", layout="wide")
 
@@ -387,13 +394,14 @@ def render_login():
     )
     st.caption("프로토타입 미리보기")
 
-    # 4대 기능 영역 카드 (2 × 2) — 박스 높이를 맞춘다.
-    for i in range(0, len(_INTRO_MODULES), 2):
-        cols = st.columns(2)
-        for col, (icon, title, items) in zip(cols, _INTRO_MODULES[i:i + 2]):
-            with col.container(border=True, height=250):
-                st.markdown(f"#### {icon} {title}")
-                st.markdown("\n".join(f"- {x}" for x in items))
+    # 4대 기능 영역 카드 (2 × 2) — 테스트 간소화 모드에서는 숨긴다.
+    if not TEST_SIMPLE_MODE:
+        for i in range(0, len(_INTRO_MODULES), 2):
+            cols = st.columns(2)
+            for col, (icon, title, items) in zip(cols, _INTRO_MODULES[i:i + 2]):
+                with col.container(border=True, height=250):
+                    st.markdown(f"#### {icon} {title}")
+                    st.markdown("\n".join(f"- {x}" for x in items))
 
     st.divider()
     users = auth.list_users(DB_PATH)
@@ -446,16 +454,21 @@ _CLIENT_MENU = [
     ("🧑‍💼", "DC·IRP 가입 컨설팅 (종업원)", False),
 ]
 if user["role"] == "client":
+    # 테스트 간소화 모드: IFRS 1019만 노출(나머지 메뉴 숨김) + 항상 메인으로 고정
+    _menu_items = _CLIENT_MENU[:1] if TEST_SIMPLE_MODE else _CLIENT_MENU
+    if TEST_SIMPLE_MODE:
+        st.session_state["client_menu"] = 0
     st.sidebar.divider()
     st.sidebar.markdown("##### 업무 메뉴")
     _cmenu_sel = st.session_state.get("client_menu", 0)
-    for _i, (_icon, _title, _active) in enumerate(_CLIENT_MENU):
+    for _i, (_icon, _title, _active) in enumerate(_menu_items):
         if st.sidebar.button(f"{_icon} {_title}", key=f"cmenu_{_i}", width="stretch",
                              type=("primary" if _i == _cmenu_sel else "secondary")):
             st.session_state["client_menu"] = _i
             st.rerun()
         # 모든 항목에 캡션을 달아 버튼 간 간격을 일정하게 유지
-        st.sidebar.caption("　✅ 사용 가능" if _active else "　🧪 설계안(미리보기)")
+        if not TEST_SIMPLE_MODE:
+            st.sidebar.caption("　✅ 사용 가능" if _active else "　🧪 설계안(미리보기)")
 
 st.sidebar.divider()
 st.sidebar.caption("⚠️ 실데이터(개인정보)는 배포·보안 확정 전 업로드 금지")
@@ -469,7 +482,15 @@ CALCULATOR_FIRM = "위키소프트"
 PURPOSES = ["IFRS-1019(재무제표)", "재정검증", "기타"]
 BENEFIT_RULES = ["법정제", "누진제", "기타"]
 UNDER1YR_METHODS = ["일할", "월할(절상)", "월할(절하)"]
-DISCOUNT_BASES = ["회사채AA+", "국공채", "기타"]
+DISCOUNT_BASES = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "기타"]
+# 사외적립자산 적립비율(가입비율) 선택지 — 기타 선택 시 직접 입력
+FUNDING_RATIO_OPTIONS = ["100%", "90%", "80%", "70%", "60%", "50%", "기타"]
+DISCOUNT_RATE_NOTE = (
+    "※ 퇴직급여채무 산정시 사용되는 할인율은 [기업회계기준서 제1019호]에 의거, "
+    "보고기간 말 현재 우량회사채 시장수익률 또는 국공채의 시장수익률을 사용합니다.\n"
+    "　　· 기존에 평가를 받은 적이 있는 경우는 평가보고서에서 확인 가능합니다.\n"
+    "　　· 기존에 평가를 받은 적이 없는 경우는 회계사(감사인)께 문의하시면 확인 가능합니다."
+)
 # 탈퇴·지급 시점(할인 기준) — 연중(mid_year)이 한국 실무 표준·기본값
 TIMING_OPTS = ["연중(mid-year) — 권장", "연말(end-of-year)"]
 DEFAULT_TIMING = "mid_year"
@@ -1007,7 +1028,10 @@ def _client_main(user):
         _client_edit_screen(user, editing)
     else:
         st.session_state.pop("client_detail_sid", None)
-        _client_apply(user)         # 2. 확정급여제도 부채 계산 신청
+        _client_apply(user)         # 2. DB 부채계산 신청
+    st.divider()
+    st.subheader("3. 질의응답")
+    _render_qa_panel(user["company_id"], "client", user["id"])   # 3. 질의응답
     st.divider()
     with st.expander("🏢 기업 기본 정보 (담당자·연락처·결산월·주소)", expanded=False):
         _client_company_info(user)      # 기업 기본 정보 (접이식, 화면 절반↓)
@@ -1031,17 +1055,18 @@ def _client_edit_screen(user, sid):
     st.caption("아래에서 수정하세요. 각 항목은 **저장** 버튼으로 저장되고, 명부는 다시 올리면 갱신됩니다. "
                "다 마치면 맨 아래 **수정 완료**를 누르세요.")
     val_date = dt.date.fromisoformat(sub["valuation_date"])
-    with st.expander("🏢 제도입력 (퇴직금 제도 정보)", expanded=True):
+    with st.expander("① 🏢 제도입력 (퇴직금 제도 정보)", expanded=True):
         _client_plan_info_form(user)
-    with st.expander("📊 운영현황(사외적립자산)", expanded=False):
-        _client_operation_status(user)
-    with st.expander("📋 명부 수정 (재업로드하면 이 건이 갱신)", expanded=True):
+    with st.expander("② 📋 명부 수정 (재업로드하면 이 건이 갱신)", expanded=True):
         _client_census_form(user, val_date, sub["purpose"] or PURPOSES[0], edit_sid=sid)
-    with st.expander("🎖 기타장기", expanded=False):
+    with st.expander("③ 📊 기초율 (할인율·임금인상율·사외적립율)", expanded=False):
+        _client_basis_rates(user)
+    with st.expander("④ 🎖 기타장기", expanded=False):
         _client_other_lt(user)
-    with st.expander("📈 경험기초율 산출데이터  ·  300인 이상 기업 중 자체 경험율 사용 기업만 해당",
-                     expanded=False):
-        _client_experience_data(user)
+    with st.expander("⑤ 📑 명부확인용 요약표 (재직자명부 등록 후)", expanded=False):
+        _client_census_summary(user)
+    with st.expander("⑥ 💰 사외적립자산", expanded=False):
+        _client_operation_status(user)
 
     st.divider()
     b1, b2, _ = st.columns([1.3, 1.3, 4])
@@ -1232,8 +1257,7 @@ def _client_past_reports(user):
     st.subheader("1. 현황조회")
     subs = store.list_submissions(DB_PATH, company_id=user["company_id"])
     if not subs:
-        st.info("아직 신청 내역이 없습니다. 아래 '2. 확정급여제도 부채 계산 신청'에서 진행하세요.")
-        _render_qa_panel(user["company_id"], "client", user["id"])
+        st.info("아직 신청 내역이 없습니다. 아래 '2. DB 부채계산 신청'에서 진행하세요.")
         return
 
     cc = Counter(_client_category(s["status"]) for s in subs)
@@ -1249,9 +1273,6 @@ def _client_past_reports(user):
     else:
         # '수정' 클릭 시 client_detail_sid가 설정되고, page_client가 편집화면을 연다.
         _render_submission_list(user, rows, "client")
-
-    st.divider()
-    _render_qa_panel(user["company_id"], "client", user["id"])
 
     # 감사 대응 Q&A(보고서 설명) — 기업검토요청 단계부터 보고서 내용 설명 제공
     _explain = [s for s in subs if s["status"] in ("client_review", "reported")
@@ -1346,26 +1367,28 @@ def _client_detail(user, sid):
                         st.success(msg) if ok else st.error(msg)
 
 
-# ── 2. 확정급여제도 부채 계산 신청 ──────────────────────────────────────────
+# ── 2. DB 부채계산 신청 ─────────────────────────────────────────────────────
 def _client_apply(user):
-    st.subheader("2. 확정급여제도 부채 계산 신청")
+    st.subheader("2. DB 부채계산 신청")
     c1, c2 = st.columns(2)
     val_date = c1.date_input("산출기준일", dt.date(dt.date.today().year, 12, 31), key="apply_vdate")
     purpose = c2.selectbox("산출목적", PURPOSES, key="apply_purpose")
-    st.caption("① 제도입력 → ② 명부등록 → (필요 시 운영현황·지난보고서) → **신청하기** 순서로 진행하세요.")
+    st.caption("① 제도입력 → ② 명부입력 → ③ 기초율 → ④ 기타장기 → ⑤ 명부확인용 요약표 → "
+               "⑥ 사외적립자산 → ⑦ 지난보고서 순으로 진행 후 **신청하기**를 누르세요.")
 
-    with st.expander("🏢 제도입력 (퇴직금 제도 정보)", expanded=False):
+    with st.expander("① 🏢 제도입력 (퇴직금 제도 정보)", expanded=False):
         _client_plan_info_form(user)
-    with st.expander("📊 운영현황(사외적립자산)", expanded=False):
-        _client_operation_status(user)
-    with st.expander("📋 명부등록", expanded=True):
+    with st.expander("② 📋 명부입력", expanded=True):
         _client_census_form(user, val_date, purpose)
-    with st.expander("🎖 기타장기 (장기근속 포상 등 기타장기종업원급여)", expanded=False):
+    with st.expander("③ 📊 기초율 (할인율·임금인상율·사외적립율)", expanded=False):
+        _client_basis_rates(user)
+    with st.expander("④ 🎖 기타장기 (장기근속 포상 등 기타장기종업원급여)", expanded=False):
         _client_other_lt(user)
-    with st.expander("📈 경험기초율 산출데이터  ·  300인 이상 기업 중 자체 경험율 사용 기업만 해당",
-                     expanded=False):
-        _client_experience_data(user)
-    with st.expander("📎 지난보고서 등록 (전 계리법인 자료)", expanded=False):
+    with st.expander("⑤ 📑 명부확인용 요약표 (재직자명부 등록 후)", expanded=False):
+        _client_census_summary(user)
+    with st.expander("⑥ 💰 사외적립자산", expanded=False):
+        _client_operation_status(user)
+    with st.expander("⑦ 📎 지난보고서 등록 (전 계리법인 자료)", expanded=False):
         _client_prior_form(user)
 
     st.divider()
@@ -1396,14 +1419,19 @@ def _client_apply(user):
                       help="먼저 '명부등록'에서 명부 파일을 업로드하세요.")
 
 
-def _client_plan_info_form(user):
-    pi = store.get_plan_info(DB_PATH, user["company_id"]) or {}
+def _plan_detail(company_id):
+    """plan_info + detail(dict) 로드 헬퍼."""
+    pi = store.get_plan_info(DB_PATH, company_id) or {}
     try:
         d = json.loads(pi["detail_json"]) if pi.get("detail_json") else {}
     except Exception:
         d = {}
-    this_year = dt.date.today().year
-    years = [str(y) for y in range(this_year - 5, this_year)]   # 과거 5년
+    return pi, d
+
+
+def _client_plan_info_form(user):
+    """① 제도 일반 · ② 정년·근무기간 (할인율·임금인상율·사외적립율은 '기초율'로 이동)."""
+    pi, d = _plan_detail(user["company_id"])
 
     with st.form("plan_info"):
         st.markdown("**① 제도 일반**")
@@ -1437,21 +1465,64 @@ def _client_plan_info_form(user):
                                     value=d.get("rate_adjust_desc", ""))
         interim_allowed = c.checkbox("중간정산 허용", value=bool(pi.get("interim_allowed")))
         interim_cycle = e.text_input("중간정산 주기", pi.get("interim_cycle") or "")
+        notes = st.text_area("특이사항", pi.get("notes") or "")
+
+        if st.form_submit_button("💾 제도 정보 저장", type="primary"):
+            d.update({
+                "benefit_rule_desc": benefit_rule_desc,
+                "exec_retirement_age": int(exec_ret), "wage_peak_applied": bool(wage_peak),
+                "wage_peak_age": int(wage_peak_age), "under1yr_method": under1yr,
+                "normal_cost_at_retirement": bool(normal_cost_ret), "rate_adjust_desc": rate_adjust,
+            })
+            store.save_plan_info(DB_PATH, user["company_id"], {
+                "plan_type": plan_type, "established_date": established, "benefit_rule": benefit_rule,
+                "interim_allowed": int(interim_allowed), "interim_cycle": interim_cycle,
+                "retirement_age": int(retirement_age), "salary_basis": salary_basis,
+                "notes": notes,
+                "detail_json": json.dumps(d, ensure_ascii=False),
+            }, user["id"], now())
+            store.log_action(DB_PATH, user["id"], "plan_info", now())
+            st.success("제도 정보를 저장했습니다.")
+
+    # 누진제/기타 관련 서류 업로드 (폼 밖 — 즉시 저장)
+    if pi.get("benefit_rule") in ("누진제", "기타"):
+        st.markdown("**📎 누진제/기타 제도 관련 서류 업로드**")
+        up = st.file_uploader("규정·산식 서류 (pdf/이미지/xlsx)", type=["pdf", "jpg", "jpeg", "png", "xlsx"],
+                              key="prog_rule_up")
+        if up is not None and st.button("서류 저장", key="prog_rule_save"):
+            d2 = FILES_DIR / "plan_rule" / f"c{user['company_id']}"
+            d2.mkdir(parents=True, exist_ok=True)
+            stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            p = d2 / f"{stamp}_{up.name}"
+            p.write_bytes(up.getbuffer())
+            store.add_aux_census(DB_PATH, user["company_id"], "누진제규정서류", up.name, str(p),
+                                 user["id"], now())
+            st.success("서류를 저장했습니다.")
+        for f in store.list_aux_census(DB_PATH, user["company_id"], "누진제규정서류"):
+            st.caption(f"📄 {f['filename']}")
+
+
+def _client_basis_rates(user):
+    """기초율 — a.할인율 · b.임금인상율 · c.경험기초율 · d.사외적립율."""
+    pi, d = _plan_detail(user["company_id"])
+    this_year = dt.date.today().year
+    years = [str(y) for y in range(this_year - 5, this_year)]   # 과거 5년
+
+    # ── a. 할인율 · b. 임금인상율 (한 폼) ──
+    with st.form("basis_ab"):
+        st.markdown("**a. 할인율**")
+        _saved_db = d.get("discount_basis") or "AA+"
+        if _saved_db == "회사채AA+":
+            _saved_db = "AA+"
+        discount_basis = st.selectbox("할인율 산출 기준 (회사채 신용등급)", DISCOUNT_BASES,
+                                      index=_idx(DISCOUNT_BASES, _saved_db))
+        discount_other = st.text_input("└ 기타 선택 시 직접 입력 (예: 국공채, BBB+ 등)",
+                                       value=d.get("discount_basis_other", ""),
+                                       disabled=(discount_basis != "기타"))
+        st.caption(DISCOUNT_RATE_NOTE)
 
         st.divider()
-        st.markdown("**③ 사외적립 · 할인율**")
-        f, g = st.columns(2)
-        _fd = ["없음", "확정급여형(DB)", "확정기여형(DC)", "IRP", "혼합"]
-        external_funding = f.selectbox("사외적립", _fd, index=_idx(_fd, pi.get("external_funding")))
-        funding_institution = g.text_input("적립 기관", pi.get("funding_institution") or "")
-        funding_ratio = f.number_input("사외적립 계획비율(%)", value=float(pi.get("funding_ratio") or 0.0),
-                                       step=1.0, help="평가일로부터 1년 후(다음 회계연도 말) 회사가 계획하는 적립비율")
-        discount_basis = g.selectbox("할인율 산출 기준", DISCOUNT_BASES,
-                                     index=_idx(DISCOUNT_BASES, d.get("discount_basis") or "회사채AA+"))
-        discount_other = st.text_input("할인율 기준 '기타' 상세", value=d.get("discount_basis_other", ""))
-
-        st.divider()
-        st.markdown("**④ 임금인상률(Base-up)**")
+        st.markdown("**b. 임금인상율(Base-up)**")
         _wsys = ["호봉제", "연봉제"]
         wage_system = st.selectbox("임금체계", _wsys, index=_idx(_wsys, d.get("salary_system") or "연봉제"),
                                    help="호봉제: 근무기간에 따라 호봉 상승 / 연봉제: 성과에 따라 급여 결정")
@@ -1477,145 +1548,150 @@ def _client_plan_info_form(user):
                                     "제도4": "", "제도5": "", "제도6": ""} for yr in years])
         grp_edit = st.data_editor(grp_df, num_rows="dynamic", width="stretch", key="baseup_grp")
 
-        notes = st.text_area("특이사항", pi.get("notes") or "")
-
-        if st.form_submit_button("💾 제도 정보 저장", type="primary"):
-            detail = {
-                "benefit_rule_desc": benefit_rule_desc,
-                "exec_retirement_age": int(exec_ret), "wage_peak_applied": bool(wage_peak),
-                "wage_peak_age": int(wage_peak_age), "under1yr_method": under1yr,
-                "normal_cost_at_retirement": bool(normal_cost_ret), "rate_adjust_desc": rate_adjust,
+        if st.form_submit_button("💾 할인율·임금인상율 저장", type="primary"):
+            d.update({
                 "discount_basis": discount_basis, "discount_basis_other": discount_other,
                 "salary_system": wage_system, "salary_hobong": (wage_system == "호봉제"),
                 "baseup_proposed": float(proposed), "baseup": baseup,
                 "baseup_by_group": grp_edit.to_dict("records"),
-            }
-            store.save_plan_info(DB_PATH, user["company_id"], {
-                "plan_type": plan_type, "established_date": established, "benefit_rule": benefit_rule,
-                "interim_allowed": int(interim_allowed), "interim_cycle": interim_cycle,
-                "retirement_age": int(retirement_age), "salary_basis": salary_basis,
-                "external_funding": external_funding, "funding_institution": funding_institution,
-                "funding_ratio": float(funding_ratio), "notes": notes,
-                "detail_json": json.dumps(detail, ensure_ascii=False),
-            }, user["id"], now())
-            store.log_action(DB_PATH, user["id"], "plan_info", now())
-            st.success("제도 정보를 저장했습니다.")
-
-    # 누진제/기타 관련 서류 업로드 (폼 밖 — 즉시 저장)
-    if pi.get("benefit_rule") in ("누진제", "기타"):
-        st.markdown("**📎 누진제/기타 제도 관련 서류 업로드**")
-        up = st.file_uploader("규정·산식 서류 (pdf/이미지/xlsx)", type=["pdf", "jpg", "jpeg", "png", "xlsx"],
-                              key="prog_rule_up")
-        if up is not None and st.button("서류 저장", key="prog_rule_save"):
-            d2 = FILES_DIR / "plan_rule" / f"c{user['company_id']}"
-            d2.mkdir(parents=True, exist_ok=True)
-            stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            p = d2 / f"{stamp}_{up.name}"
-            p.write_bytes(up.getbuffer())
-            store.add_aux_census(DB_PATH, user["company_id"], "누진제규정서류", up.name, str(p),
+            })
+            store.save_plan_info(DB_PATH, user["company_id"],
+                                 {"detail_json": json.dumps(d, ensure_ascii=False)},
                                  user["id"], now())
-            st.success("서류를 저장했습니다.")
-        for f in store.list_aux_census(DB_PATH, user["company_id"], "누진제규정서류"):
-            st.caption(f"📄 {f['filename']}")
+            st.success("할인율·임금인상율을 저장했습니다.")
 
-
-def _client_operation_status(user):
-    """사외적립자산 현황 — 자금 흐름(기초→입금→지급→전출입→운용성과→기말) 도식 입력."""
-    st.markdown("### 💰 사외적립자산 현황")
-    st.caption("산출기준일 기준 · DC형 자산 제외 · 금액은 모두 (+) · 회계장부와 일치해야 합니다.")
-    fs = store.get_funding_status(DB_PATH, user["company_id"])
-    try:
-        fd = json.loads(fs["data_json"]) if fs and fs["data_json"] else {}
-    except Exception:
-        fd = {}
-    won = "%.0f"
-
-    def n(col, k, label):
-        return col.number_input(label, value=float(fd.get(k) or 0.0), step=1e6,
-                                format=won, key=f"fs_{k}")
-
-    v = {}
-    fvd = st.text_input("작성기준일(산출기준일)",
-                        value=(fs["valuation_date"] if fs else "") or f"{dt.date.today().year - 1}-12-31",
-                        placeholder="예: 2025-12-31")
-
-    c = st.columns(2)
-    v["기초잔액"] = n(c[0], "기초잔액", "① 기초 잔액 (A)")
-    v["입금액"] = n(c[1], "입금액", "② 입금(수탁)액 (B) ＋")
-
-    st.markdown("**③ 급여지급(인출) (C) ⊖**")
-    c = st.columns(3)
-    v["지급_퇴직"] = n(c[0], "지급_퇴직", "퇴직")
-    v["지급_중간정산"] = n(c[1], "지급_중간정산", "중간정산")
-    v["지급_DC전환"] = n(c[2], "지급_DC전환", "DC전환")
-    C = v["지급_퇴직"] + v["지급_중간정산"] + v["지급_DC전환"]
-    st.caption(f"급여지급 소계 (C) = {C:,.0f}")
-
-    st.markdown("**④ 관계사 전입/전출 (D) ±**")
-    c = st.columns(2)
-    v["관계사전입"] = n(c[0], "관계사전입", "전입 (＋)")
-    v["관계사전출"] = n(c[1], "관계사전출", "전출 (－)")
-    D = v["관계사전입"] - v["관계사전출"]
-
-    st.markdown("**⑤ 사업결합/처분 (E) ±**")
-    c = st.columns(2)
-    v["사업결합"] = n(c[0], "사업결합", "사업결합 (＋)")
-    v["사업처분"] = n(c[1], "사업처분", "사업처분 (－)")
-    E = v["사업결합"] - v["사업처분"]
-
-    st.markdown("**⑥ 운용성과 (F) ±**")
-    c = st.columns(2)
-    v["투자수익"] = n(c[0], "투자수익", "투자수익 (＋)")
-    v["운용수수료"] = n(c[1], "운용수수료", "운용관리수수료 (－)")
-    F = v["투자수익"] - v["운용수수료"]
+    st.info("ℹ️ **경험퇴직률**은 별도 코너가 아니라 **② 명부입력**의 "
+            "‘퇴직자명부 300인이상(직전 3년~5년)’ 을 올리면 계리사가 그 명부로 산출합니다. "
+            "(자체 경험율 사용 기업만 작성)")
 
     st.divider()
-    st.markdown("**⑦ 기말 잔액**")
-    c = st.columns(3)
-    v["기말_퇴직연금"] = n(c[0], "기말_퇴직연금", "퇴직연금")
-    v["기말_퇴직신탁"] = n(c[1], "기말_퇴직신탁", "퇴직신탁")
-    v["기말_퇴직보험"] = n(c[2], "기말_퇴직보험", "퇴직보험")
-    end_input = v["기말_퇴직연금"] + v["기말_퇴직신탁"] + v["기말_퇴직보험"]
-    formula = v["기초잔액"] + v["입금액"] - C + D + E + F
+    st.markdown("**c. 사외적립율(적립비율·가입비율)**")
+    with st.form("basis_funding"):
+        _cur_ratio = pi.get("funding_ratio")
+        _cur_label = None
+        if _cur_ratio not in (None, "", 0, 0.0):
+            _cur_label = f"{int(round(float(_cur_ratio)))}%"
+        if _cur_label in FUNDING_RATIO_OPTIONS:
+            _ratio_idx = FUNDING_RATIO_OPTIONS.index(_cur_label)
+        elif _cur_ratio not in (None, "", 0, 0.0):
+            _ratio_idx = FUNDING_RATIO_OPTIONS.index("기타")
+        else:
+            _ratio_idx = FUNDING_RATIO_OPTIONS.index("100%")
+        funding_ratio_sel = st.selectbox("사외적립자산 적립비율(가입비율)", FUNDING_RATIO_OPTIONS,
+                                         index=_ratio_idx)
+        _ratio_other_default = ""
+        if _cur_label not in FUNDING_RATIO_OPTIONS and _cur_ratio not in (None, "", 0, 0.0):
+            _ratio_other_default = f"{float(_cur_ratio):g}"
+        funding_ratio_other = st.text_input("└ 기타 선택 시 적립비율(%) 직접 입력 (예: 65)",
+                                            value=_ratio_other_default,
+                                            disabled=(funding_ratio_sel != "기타"))
+        st.caption("※ 평가일로부터 1년 후(다음 회계년도 말) 회사가 계획하는 사외자산 "
+                   "적립비율을 선택하여 주십시오. (기타의 경우 별도 기입)")
+        if st.form_submit_button("💾 사외적립율 저장", type="primary"):
+            if funding_ratio_sel == "기타":
+                try:
+                    funding_ratio = float(str(funding_ratio_other).replace("%", "").strip() or 0.0)
+                except ValueError:
+                    funding_ratio = 0.0
+            else:
+                funding_ratio = float(funding_ratio_sel.replace("%", ""))
+            store.save_plan_info(DB_PATH, user["company_id"],
+                                 {"funding_ratio": float(funding_ratio)}, user["id"], now())
+            st.success("사외적립율을 저장했습니다.")
+
+
+def _latest_active_census_records(company_id: int):
+    """회사의 최신 재직자명부(제출건) 레코드를 로드해 반환. 없으면 None."""
+    try:
+        subs = store.list_submissions(DB_PATH, company_id=company_id)
+    except Exception:
+        return None
+    for s in subs:
+        p = Path(s.get("stored_path") or "")
+        if p.exists():
+            try:
+                recs, _r, _d = load_census(p, column_map=COLMAP)
+                if recs:
+                    return recs
+            except Exception:
+                continue
+    return None
+
+
+def _default_vdate(company_id: int) -> str:
+    fs = store.get_funding_status(DB_PATH, company_id)
+    if fs and fs.get("valuation_date"):
+        return fs["valuation_date"]
+    return f"{dt.date.today().year - 1}-12-31"
+
+
+def _client_operation_status(user, company_id=None, kp=""):
+    """사외적립자산 현황 — 양식 다운로드 → 작성 후 업로드 → 결과값 편집 미리보기(저장)."""
+    cid = company_id or user["company_id"]
+    st.markdown("### 💰 사외적립자산 현황")
+    st.caption("화면에 하나하나 입력하지 않고, **양식을 내려받아 작성 → 업로드**하면 "
+               "결과값을 아래 표에서 확인·수정하고 저장합니다. (DC형 자산 제외 · 회계장부와 일치)")
+    st.download_button("📄 사외적립자산 양식 다운로드", AF.build_funding_template(_default_vdate(cid)),
+                       file_name="사외적립자산_양식.xlsx", key=f"fund_tmpl_{kp}{cid}", width="stretch")
+
+    up = st.file_uploader("작성한 사외적립자산 양식 업로드 (xlsx)", type=["xlsx"], key=f"fund_up_{kp}{cid}")
+    edit_key = f"fund_edit_{kp}{cid}"
+    if up is not None:
+        try:
+            parsed = AF.parse_funding_upload(bytes(up.getbuffer()))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"양식을 읽을 수 없습니다: {e}")
+            parsed = None
+        if parsed is not None:
+            st.session_state[edit_key] = parsed
+            st.success("✅ 업로드 완료 — 아래 표에서 값을 확인·수정한 뒤 저장하세요.")
+
+    # 편집 대상: 방금 업로드분 우선, 없으면 기존 저장값
+    src = st.session_state.get(edit_key)
+    if src is None:
+        fs = store.get_funding_status(DB_PATH, cid)
+        try:
+            src = json.loads(fs["data_json"]) if fs and fs.get("data_json") else None
+        except Exception:
+            src = None
+    if src is None:
+        st.info("아직 등록된 사외적립자산 자료가 없습니다. 양식을 내려받아 작성·업로드하세요.")
+        return
+
+    vdate = src.get("_valuation_date") or _default_vdate(cid)
+    fvd = st.text_input("작성기준일(산출기준일)", value=vdate, key=f"fund_vd_{kp}{cid}")
+    rows = [{"항목": lb, "금액(원)": float(src.get(key) or 0.0)}
+            for key, lb, _n in AF._FUNDING_ROWS]
+    edited = st.data_editor(pd.DataFrame(rows), width="stretch", hide_index=True,
+                            disabled=["항목"], key=f"fund_de_{kp}{cid}")
+    disc_method = st.selectbox("국민연금전환금 공시방법", DISCLOSURE_METHODS,
+                               index=_idx(DISCLOSURE_METHODS, src.get("공시방법")),
+                               key=f"fund_disc_{kp}{cid}")
+    # 기말잔액 검증(산식 A+B−C+D+E+F vs 입력)
+    vals = {AF._FUNDING_ROWS[i][0]: float(edited.iloc[i]["금액(원)"] or 0)
+            for i in range(len(AF._FUNDING_ROWS))}
+    C = vals["지급_퇴직"] + vals["지급_중간정산"] + vals["지급_DC전환"]
+    D = vals["관계사전입"] - vals["관계사전출"]
+    E = vals["사업결합"] - vals["사업처분"]
+    F = vals["투자수익"] - vals["운용수수료"]
+    end_input = vals["기말_퇴직연금"] + vals["기말_퇴직신탁"] + vals["기말_퇴직보험"]
+    formula = vals["기초잔액"] + vals["입금액"] - C + D + E + F
     m1, m2, m3 = st.columns(3)
     m1.metric("기말잔액(산식)", f"{formula:,.0f}", help="A + B − C + D + E + F")
     m2.metric("기말잔액(입력)", f"{end_input:,.0f}")
     diff = round(formula - end_input)
     m3.metric("차이", f"{diff:,.0f}")
     if diff != 0:
-        st.error("⚠️ 산식과 입력 기말잔액이 다릅니다 — 입력값을 재확인하세요.")
+        st.warning("⚠️ 산식과 입력 기말잔액이 다릅니다 — 값을 재확인하세요.")
     else:
         st.success("✅ 산식 = 입력 (일치)")
 
-    c = st.columns(2)
-    v["국민연금전환금"] = n(c[0], "국민연금전환금", "국민연금전환금")
-    disc_method = c[1].selectbox("국민연금전환금 공시방법", DISCLOSURE_METHODS,
-                                 index=_idx(DISCLOSURE_METHODS, fd.get("공시방법")))
-
-    st.divider()
-    st.markdown("**⑧ 사외적립자산 세부내역 & 구성비**")
-    c = st.columns(5)
-    v["세부_현금"] = n(c[0], "세부_현금", "현금등가물")
-    v["세부_지분"] = n(c[1], "세부_지분", "지분상품")
-    v["세부_채권"] = n(c[2], "세부_채권", "채권")
-    v["세부_부동산"] = n(c[3], "세부_부동산", "부동산")
-    v["세부_기타"] = n(c[4], "세부_기타", "기타자산")
-    detail_sum = (v["세부_현금"] + v["세부_지분"] + v["세부_채권"]
-                  + v["세부_부동산"] + v["세부_기타"])
-    if detail_sum:
-        comp = pd.DataFrame([{
-            "구분": lb,
-            "금액": v[k],
-            "구성비(%)": round(v[k] / detail_sum * 100, 1),
-        } for k, lb in [("세부_현금", "현금등가물"), ("세부_지분", "지분상품"),
-                        ("세부_채권", "채권"), ("세부_부동산", "부동산"), ("세부_기타", "기타자산")]])
-        st.dataframe(comp, width="stretch", hide_index=True)
-        st.caption(f"세부내역 합계: {detail_sum:,.0f}")
-
-    if st.button("💾 사외적립자산 현황 저장", type="primary"):
-        v["공시방법"] = disc_method
-        store.save_funding_status(DB_PATH, user["company_id"], fvd,
-                                  json.dumps(v, ensure_ascii=False), user["id"], now())
+    if st.button("💾 사외적립자산 현황 저장", type="primary", key=f"fund_save_{kp}{cid}"):
+        save = dict(vals)
+        save["공시방법"] = disc_method
+        store.save_funding_status(DB_PATH, cid, fvd,
+                                  json.dumps(save, ensure_ascii=False), user["id"], now())
+        st.session_state.pop(edit_key, None)
         st.success("사외적립자산 현황을 저장했습니다.")
 
 
@@ -2016,55 +2092,111 @@ def _client_experience_data(user):
     _aux_list_ui(user, store.EXPERIENCE_CENSUS_TYPE)
 
 
-def _client_other_lt(user):
-    st.caption("장기근속 포상 등 기타장기종업원급여 규정을 입력하고, 대상 재직자 명부를 등록합니다.")
-    for line in CT.OTHER_LT_CENSUS["guide"]:
-        st.markdown(line if line[:1] in ("★", "·") else f"- {line}")
+def _client_other_lt(user, company_id=None, kp=""):
+    """기타장기 포상제도 — 양식(사용자 원본) 다운로드 → 작성 후 업로드(파일 저장·미리보기)."""
+    cid = company_id or user["company_id"]
+    st.caption("장기근속 포상 등 **기타장기종업원급여** 자료입니다. 화면에 하나하나 입력하지 않고 "
+               "**양식을 내려받아 작성 → 업로드**하면 파일이 저장되고 아래에 내용이 표시됩니다.")
+    st.download_button("📄 기타장기 포상제도 양식 다운로드", AF.build_other_lt_template(),
+                       file_name="기타장기_포상제도_양식.xlsx", key=f"olt_tmpl_{kp}{cid}", width="stretch")
 
-    st.markdown("**1) 기타장기종업원급여 지급규정**")
-    st.caption("근속상별 지급액·상승률·유급휴가 등을 입력하세요. (예: 10년 근속상 금 5돈, 유급휴가 5일)")
-    rec = store.get_other_lt(DB_PATH, user["company_id"])
-    try:
-        saved_rows = json.loads(rec["rules_json"]) if rec and rec["rules_json"] else []
-    except Exception:
-        saved_rows = []
-    base = pd.DataFrame(saved_rows) if saved_rows else pd.DataFrame(
-        [{c: "" for c in CT.OTHER_LT_RULE_COLS} for _ in range(3)])
-    for c in CT.OTHER_LT_RULE_COLS:
-        if c not in base.columns:
-            base[c] = ""
-    base = base[CT.OTHER_LT_RULE_COLS]
-    edited = st.data_editor(base, num_rows="dynamic", width="stretch", key="olt_editor")
-    note = st.text_input("비고 / 특이사항", value=(rec["note"] if rec else "") or "", key="olt_note")
-    if st.button("💾 기타장기 규정 저장", key="olt_save"):
-        rows = [r for r in edited.to_dict("records")
-                if any(str(v).strip() for v in r.values())]
-        store.save_other_lt(DB_PATH, user["company_id"], json.dumps(rows, ensure_ascii=False),
-                            note, user["id"], now())
-        st.success("기타장기 규정을 저장했습니다.")
+    up = st.file_uploader("작성한 기타장기 양식 업로드 (xlsx)", type=["xlsx"], key=f"olt_up_{kp}{cid}")
+    if up is not None:
+        raw = bytes(up.getbuffer())
+        sig = f"olt|{up.name}|{len(raw)}"
+        done_key = f"olt_done_{kp}{cid}"
+        if st.session_state.get(done_key) != sig:
+            FILES_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved = FILES_DIR / f"c{cid}_oltform_{stamp}_{up.name}"
+            saved.write_bytes(raw)
+            store.add_aux_census(DB_PATH, cid, "기타장기포상제도", up.name, str(saved),
+                                 user["id"], now())
+            st.session_state[done_key] = sig
+            st.success("✅ 기타장기 포상제도 자료를 저장했습니다.")
+
+    files = store.list_aux_census(DB_PATH, cid, "기타장기포상제도")
+    if files:
+        latest = files[0]
+        p = Path(latest["stored_path"])
+        if p.exists():
+            st.download_button(f"⬇ 저장된 파일: {latest['filename']}", p.read_bytes(),
+                               file_name=latest["filename"], key=f"oltdl_{kp}{cid}")
+            try:
+                prev = pd.read_excel(p, header=None).fillna("")
+                st.caption("업로드된 내용 미리보기")
+                st.dataframe(prev, width="stretch", hide_index=True)
+            except Exception:
+                pass
 
     st.divider()
-    st.markdown("**2) 기타장기 재직자 명부**")
+    st.markdown("**기타장기 재직자 명부** (대상자 명부 — 별도 등록)")
     meta = CT.OTHER_LT_CENSUS
     st.download_button("📄 기타장기 재직자명부 양식 다운로드",
                        CT.build_template(meta["cols"], meta["guide"], "기타장기 재직자명부"),
-                       file_name="기타장기_재직자명부_양식.xlsx", key="tmpl_olt")
-    up = st.file_uploader("기타장기 재직자 명부 업로드", type=["xlsx", "csv"], key="up_olt")
-    if up is not None:
-        raw = bytes(up.getbuffer())
+                       file_name="기타장기_재직자명부_양식.xlsx", key=f"tmpl_olt_{kp}{cid}")
+    up2 = st.file_uploader("기타장기 재직자 명부 업로드", type=["xlsx", "csv"], key=f"up_olt_{kp}{cid}")
+    if up2 is not None:
+        raw = bytes(up2.getbuffer())
         FILES_DIR.mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        saved = FILES_DIR / f"c{user['company_id']}_otlt_{stamp}_{up.name}"
-        dropped, read_err = _save_census_file(raw, up.name, saved)
+        saved = FILES_DIR / f"c{cid}_otlt_{stamp}_{up2.name}"
+        dropped, read_err = _save_census_file(raw, up2.name, saved)
         if read_err:
             st.error(f"파일을 읽을 수 없습니다: {read_err}")
         else:
             if dropped:
                 st.info(f"🔒 개인정보 컬럼을 자동 삭제하고 등록했습니다: {', '.join(dropped)}")
-            store.add_aux_census(DB_PATH, user["company_id"], "기타장기재직자명부",
-                                 up.name, str(saved), user["id"], now())
+            store.add_aux_census(DB_PATH, cid, "기타장기재직자명부",
+                                 up2.name, str(saved), user["id"], now())
             st.success("✅ 기타장기 재직자 명부를 저장했습니다.")
-    _aux_list_ui(user, "기타장기재직자명부")
+    _aux_list_ui(user, "기타장기재직자명부") if not company_id else _aux_list_ui(
+        {"company_id": cid}, "기타장기재직자명부")
+
+
+def _client_census_summary(user, company_id=None, kp=""):
+    """명부확인용 요약표 — 재직자명부 등록 후에만. 양식 다운로드 시 G열 자동산출."""
+    cid = company_id or user["company_id"]
+    st.caption("회사 요약장표와 명부 기재내용이 다른 경우가 많아 **추가 확인용**입니다. "
+               "양식을 내려받으면 **‘등록부명에서 자동산출된 값’(G열)** 이 재직자명부에서 자동 계산되어 채워집니다. "
+               "F열(녹색)만 회사가 확인·입력해 업로드하세요.")
+    recs = _latest_active_census_records(cid)
+    if not recs:
+        st.warning("⚠️ 먼저 **재직자명부**를 등록해 주세요. 명부확인용 요약표는 재직자명부 등록 후에만 작성할 수 있습니다.")
+        return
+    summary = AF.compute_census_summary(recs)
+    cA, cB, cC, cD = st.columns(4)
+    cA.metric("재직자 합계", f"{summary['재직_합계']:,}명")
+    cB.metric("임원/직원/계약직", f"{summary['재직_임원']}/{summary['재직_직원']}/{summary['재직_계약직']}")
+    cC.metric("추계액 합계", f"{summary['추계액_합계']:,.0f}")
+    cD.metric("중간정산자", f"{summary['중간정산자수']}명")
+    st.download_button("📄 명부확인용 요약표 양식 다운로드 (G열 자동산출 포함)",
+                       AF.build_census_summary_template(summary, _default_vdate(cid)),
+                       file_name="명부확인용_요약표_양식.xlsx", key=f"sum_tmpl_{kp}{cid}", width="stretch")
+
+    up = st.file_uploader("작성한 명부확인용 요약표 업로드 (xlsx)", type=["xlsx"], key=f"sum_up_{kp}{cid}")
+    edit_key = f"sum_edit_{kp}{cid}"
+    if up is not None:
+        try:
+            parsed = AF.parse_census_summary_upload(bytes(up.getbuffer()))
+            st.session_state[edit_key] = parsed
+            store.save_census_summary(DB_PATH, cid, json.dumps(parsed, ensure_ascii=False),
+                                      user["id"], now())
+            st.success("✅ 업로드 완료 — 아래 표에서 확인하세요. (자동산출값과 회사 입력값 비교)")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"양식을 읽을 수 없습니다: {e}")
+
+    src = st.session_state.get(edit_key)
+    if src is None:
+        rec = store.get_census_summary(DB_PATH, cid)
+        try:
+            src = json.loads(rec["data_json"]) if rec and rec.get("data_json") else None
+        except Exception:
+            src = None
+    if src and src.get("rows"):
+        df = pd.DataFrame(src["rows"])
+        st.markdown("**업로드된 요약표 (자동산출값 vs 회사 입력값)**")
+        st.dataframe(df, width="stretch", hide_index=True)
 
 
 def _client_prior_form(user):
@@ -2245,21 +2377,7 @@ def _plan_readonly(company_id):
         ("중간정산 허용", "예" if pi.get("interim_allowed") else "아니오"),
         ("중간정산 주기", pi.get("interim_cycle")),
     ])
-    tbl("③ 사외적립·할인율", [
-        ("사외적립", pi.get("external_funding")), ("적립 기관", pi.get("funding_institution")),
-        ("사외적립 계획비율(%)", pi.get("funding_ratio")),
-        ("할인율 산출기준", d.get("discount_basis")), ("할인율 기타", d.get("discount_basis_other")),
-    ])
-    tbl("④ 임금인상률", [
-        ("임금체계", d.get("salary_system")),
-        ("고객제안 인상율(%)", d.get("baseup_proposed")),
-    ])
-    if d.get("baseup") and any(d["baseup"].values()):
-        st.caption("과거 5년 Base-up(%)")
-        st.dataframe(pd.DataFrame([d["baseup"]]), width="stretch", hide_index=True)
-    if d.get("baseup_by_group"):
-        st.caption("직군별 임금인상률(%)")
-        st.dataframe(pd.DataFrame(d["baseup_by_group"]), width="stretch", hide_index=True)
+    # 할인율·사외적립비율·임금인상율은 '③ 기초율 조회'에서 확인(중복 제거)
     if pi.get("notes"):
         st.caption(f"특이사항: {pi['notes']}")
     for f in store.list_aux_census(DB_PATH, company_id, "누진제규정서류"):
@@ -2294,6 +2412,37 @@ def _funding_readonly(company_id):
     m2.metric("기말잔액(입력)", f"{end_input:,.0f}")
     m3.metric("차이", f"{round(formula - end_input):,.0f}")
     st.caption(f"공시방법: {fd.get('공시방법', '-')}")
+
+
+def _actuary_basis_readonly(company_id):
+    """기업이 입력한 기초율(할인율·임금인상율·사외적립율·경험기초율)을 계리사 화면에 조회."""
+    pi, d = _plan_detail(company_id)
+    if not pi:
+        st.info("기업이 아직 기초율 정보를 입력하지 않았습니다.")
+        return
+    _db = d.get("discount_basis") or "-"
+    if d.get("discount_basis") == "기타" and d.get("discount_basis_other"):
+        _db = f"기타({d['discount_basis_other']})"
+    st.markdown(f"**a. 할인율 산출기준**: {_db}")
+    _bp = d.get("baseup_proposed")
+    _bu = d.get("baseup") or {}
+    _bvals = [float(v) for v in _bu.values() if v]
+    _bavg = sum(_bvals) / len(_bvals) if _bvals else 0.0
+    st.markdown(f"**b. 임금인상율**: 제안 {float(_bp or 0):.2f}% · 과거5년 평균 {_bavg:.2f}%"
+                f" · 임금체계 {d.get('salary_system') or '-'}")
+    if _bu:
+        st.dataframe(pd.DataFrame([_bu]), width="stretch", hide_index=True)
+    if d.get("baseup_by_group"):
+        st.caption("직군별 임금인상율")
+        st.dataframe(pd.DataFrame(d["baseup_by_group"]), width="stretch", hide_index=True)
+    st.markdown(f"**d. 사외적립율(적립비율)**: {pi.get('funding_ratio') or '-'}%")
+    exp_files = store.list_aux_census(DB_PATH, company_id, store.EXPERIENCE_CENSUS_TYPE)
+    st.markdown(f"**c. 경험기초율 산출데이터**: {len(exp_files)}건 업로드")
+    for f in exp_files:
+        p = Path(f["stored_path"])
+        if p.exists():
+            st.download_button(f"⬇ {f['filename']}", p.read_bytes(),
+                               file_name=f["filename"], key=f"actexp_{f['id']}")
 
 
 def _compute_result_metrics(records, result, config, tables, ret_age, company_id) -> dict:
@@ -2384,6 +2533,21 @@ def _render_result_blocks(res):
             st.write(f"- 증감: {eok(pbo - prior)} ({(pbo / prior - 1) * 100:+.1f}%)")
         else:
             st.caption("전기 계리자료(지난보고서 등록)가 있으면 전기 대비 증감을 표시합니다.")
+
+    # ── 전기가정 비교 (가정변경 효과: 동일 명부·전기 임금상승율·전기 할인율) ──
+    pa = m.get("prior_assumption")
+    if pa and pa.get("pbo"):
+        st.markdown("##### 🔁 전기가정 비교 (가정변경 효과)")
+        st.caption("동일 명부에 **전기 임금상승율·전기 할인율**을 적용한 PBO와 당기가정 PBO의 차이 "
+                   "— 가정(할인율·임금상승율) 변경이 부채에 미친 효과입니다.")
+        pap = pa["pbo"]
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("당기가정 PBO", eok(pbo),
+                   help=f"적용 할인율 {m.get('disc_rate', 0)*100:.2f}% · 임금상승율 {m.get('salary_rate', 0)*100:.2f}%")
+        pc2.metric("전기가정 PBO", eok(pap),
+                   help=f"전기 할인율 {pa['discount']*100:.2f}% · 전기 임금상승율 {pa['salary']*100:.2f}%")
+        pc3.metric("가정변경 효과", eok(pbo - pap),
+                   delta=f"{(pbo/pap - 1)*100:+.1f}%" if pap else None)
 
     # ── 사용 기초율(감사추적 · 스냅샷 보존) ──
     br = m.get("base_rates")
@@ -2510,17 +2674,43 @@ def _actuary_base_rates(user):
         _actuary_dev_rates(user)
 
 
+def _build_experience_xlsx(bands, rows, summary=None) -> bytes:
+    """산출된 경험율 엑셀 — ①밴드별 경험퇴직률 ②연령별 기초율표 행."""
+    import io as _io
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "밴드별경험퇴직률"
+    if summary:
+        ws1.append([f"퇴직 {summary.get('n_withdrawals', 0)}건 · 노출 {summary.get('exposure', 0)}인년 "
+                    f"· 관측 {summary.get('obs_years', 0):.0f}년 "
+                    f"· 전체 경험퇴직률 {(summary.get('overall_withdrawal') or 0)*100:.2f}%"])
+    ws1.append(["밴드", "퇴직건수", "재직자수", "노출(인년)", "경험퇴직률(%)"])
+    for b in bands:
+        q = b.get("경험퇴직률")
+        ws1.append([b.get("밴드"), b.get("퇴직건수"), b.get("재직자수"), b.get("노출(인년)"),
+                    (round(q * 100, 4) if q is not None else None)])
+    ws2 = wb.create_sheet("연령별기초율표")
+    ws2.append(["연령", "경험퇴직률(%)", "사망률남(%)", "사망률여(%)", "승급률(%)"])
+    for r in rows:
+        def _pc(v):
+            return round(v * 100, 5) if isinstance(v, (int, float)) else None
+        ws2.append([r.get("age"), _pc(r.get("withdrawal")), _pc(r.get("mort_m")),
+                    _pc(r.get("mort_f")), _pc(r.get("raise_rate"))])
+    buf = _io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
 def _actuary_experience_rates(user, exp_stat):
-    """경험 기초율 코너 — 기업이 올린 경험데이터로 경험 퇴직률·승급률을 산출·저장."""
-    st.markdown("#### 📈 경험 기초율 산출 (회사 경험 퇴직률·승급률)")
-    st.caption("기업이 올린 '경험기초율 산출데이터'로 연령대별 경험 퇴직률·승급률을 산출합니다. "
-               "사망률은 개발원 세트에서 차용합니다. 산출한 세트는 해당 기업 전용으로 저장됩니다.")
+    """경험 기초율 코너 — 기업이 올린 '퇴직자명부(직전 3~5년)'로 경험 퇴직률을 산출·저장."""
+    st.markdown("#### 📈 경험 퇴직률 산출 (직전 3~5년 퇴직자명부 기반)")
+    st.caption("기업이 **명부입력**에서 올린 '퇴직자명부 300인이상(직전 3~5년)'의 퇴직건수를 분자로, "
+               "현재 **재직자명부**의 연령분포×관측연수를 분모(노출)로 하여 연령대별 **경험 퇴직률**을 "
+               "산출합니다. (중심탈퇴율 근사) 사망률은 개발원 세트에서 차용, 승급률은 임금인상율 입력을 사용합니다.")
     if not exp_stat:
-        st.info("아직 경험기초율 산출데이터를 올린 기업이 없습니다. "
-                "기업이 '경험기초율 산출데이터'를 업로드하면 여기에 표시됩니다.")
+        st.info("아직 퇴직자명부를 올린 기업이 없습니다. 기업이 명부입력에서 "
+                "'퇴직자명부 300인이상(직전 3~5년)'을 업로드하면 여기에 표시됩니다.")
         return
 
-    # 회사 선택 (미산출 회사를 앞에 🔔로 표시)
     def _lbl(x):
         flag = "🔔 " if x["n_sets"] == 0 else "✅ "
         return f"{flag}{x['company_name']} (업로드 {x['n_uploads']} · 세트 {x['n_sets']})"
@@ -2528,58 +2718,65 @@ def _actuary_experience_rates(user, exp_stat):
     cid = st.selectbox("기업 선택", list(opt), format_func=lambda i: _lbl(opt[i]), key="exp_co")
     files = store.list_aux_census(DB_PATH, cid, store.EXPERIENCE_CENSUS_TYPE)
     if not files:
-        st.info("이 기업의 경험데이터 파일이 없습니다.")
+        st.info("이 기업의 퇴직자명부 파일이 없습니다.")
         return
     fmap = {f["id"]: f for f in files}
-    fid = st.selectbox("데이터 파일", list(fmap),
+    fid = st.selectbox("퇴직자명부 파일", list(fmap),
                        format_func=lambda i: f"{fmap[i]['filename']} ({fmap[i]['created'][:16]})",
                        key="exp_file")
     fpath = Path(fmap[fid]["stored_path"])
     if not fpath.exists():
         st.error("파일을 찾을 수 없습니다(서버에서 삭제됨).")
         return
+    st.download_button("⬇ 기초데이터(퇴직자명부) 다운로드", fpath.read_bytes(),
+                       file_name=fmap[fid]["filename"], key="exp_data_dl")
 
     try:
-        parsed = EXP.parse_experience_data(fpath.read_bytes())
+        retirees = EXP.parse_retiree_census(fpath.read_bytes())
     except Exception as e:  # noqa: BLE001
-        st.error(f"경험데이터를 읽지 못했습니다: {e}")
+        st.error(f"퇴직자명부를 읽지 못했습니다: {e}")
         return
 
-    c1, c2, c3 = st.columns(3)
-    _os = parsed.get("obs_start")
-    _oe = parsed.get("obs_end")
-    obs_start = c1.date_input("관측 시작일", value=(_os or dt.date(dt.date.today().year - 3, 1, 1)),
-                              key="exp_os")
-    obs_end = c2.date_input("관측 종료일", value=(_oe or dt.date(dt.date.today().year - 1, 12, 31)),
-                            key="exp_oe")
-    ret_age = c3.number_input("정년", min_value=50, max_value=75, value=60, step=1, key="exp_ret")
-    st.caption(f"인식된 종업원 {parsed['n']}명"
-               + (f" · 파일 관측기간 {_os}~{_oe}" if _os and _oe else " · 관측기간은 위에서 지정"))
+    # 분모 노출: 현재 재직자명부의 연령분포
+    active = _latest_active_census_records(cid)
+    if not active:
+        st.warning("⚠️ 이 기업의 **재직자명부**가 없어 노출(분모)을 만들 수 없습니다. "
+                   "재직자명부가 등록된 뒤 산출하세요.")
+        return
+    _ref = dt.date.today()
+    active_ages = [int((_ref.toordinal() - r.birth_date.toordinal()) // 365.25)
+                   for r in active if getattr(r, "birth_date", None)]
 
-    # 사망률 차용 개발원 세트
+    c1, c2 = st.columns(2)
+    obs_years = c1.number_input("관측연수(직전 몇 년 퇴직자인가)", min_value=1.0, max_value=10.0,
+                                value=3.0, step=1.0, key="exp_oy",
+                                help="퇴직자명부가 담고 있는 기간(직전 3~5년). 분모 노출 = 재직자수 × 관측연수.")
+    ret_age = c2.number_input("정년", min_value=50, max_value=75, value=60, step=1, key="exp_ret")
+    st.caption(f"퇴직자명부 {len(retirees)}건 · 재직자(노출 분모) {len(active_ages)}명 · 관측 {obs_years:.0f}년")
+
     dev_sets = store.list_base_rate_sets(DB_PATH, kind="dev")
     _mopt = {0: "사망률 미적용(0)"}
     _mopt.update({s["id"]: f"[{s['id']}] {s['name']}" for s in dev_sets})
     mort_from = st.selectbox("사망률 차용(개발원 세트)", list(_mopt), format_func=lambda i: _mopt[i],
-                             key="exp_mort", help="경험데이터로는 사망률을 추정하기 어려워 개발원 세트에서 가져옵니다.")
+                             key="exp_mort", help="퇴직자명부로는 사망률을 추정하기 어려워 개발원 세트에서 가져옵니다.")
 
-    if st.button("🧮 경험률 산출", type="primary", key="exp_run"):
-        res = EXP.compute_experience_rates(parsed["records"], obs_start, obs_end, int(ret_age))
+    if st.button("🧮 경험 퇴직률 산출", type="primary", key="exp_run"):
+        res = EXP.compute_withdrawal_rates(retirees, active_ages, float(obs_years), int(ret_age))
         st.session_state["exp_result"] = {"res": res, "cid": cid, "mort_from": mort_from,
-                                          "ret": int(ret_age), "obs": f"{obs_start}~{obs_end}"}
+                                          "ret": int(ret_age), "oy": float(obs_years)}
 
     er = st.session_state.get("exp_result")
     if er and er.get("cid") == cid:
         res = er["res"]
         sm = res["summary"]
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("표본(명)", sm["n"])
+        k1.metric("퇴직자(건)", sm["n_withdrawals"])
         k2.metric("총 노출(인년)", f"{sm['exposure']:.1f}")
         k3.metric("경험 퇴직률(전체)", f"{(sm['overall_withdrawal'] or 0)*100:.2f}%")
-        k4.metric("경험 승급률(평균)", f"{(sm['avg_raise'] or 0)*100:.2f}%")
+        k4.metric("관측연수", f"{sm['obs_years']:.0f}년")
         if sm["skipped"]:
-            st.caption(f"생년월일·이력 부족 등으로 {sm['skipped']}건 제외.")
-        st.markdown("**연령대(밴드)별 경험률**")
+            st.caption(f"생년월일·퇴직일 부족 등으로 {sm['skipped']}건 제외.")
+        st.markdown("**연령대(밴드)별 경험 퇴직률**")
         st.dataframe(pd.DataFrame(res["bands"]), width="stretch", hide_index=True)
 
         rows = [dict(r) for r in res["rows"]]
@@ -2594,16 +2791,20 @@ def _actuary_experience_rates(user, exp_stat):
             st.dataframe(_rates_display_df(rows), width="stretch", hide_index=True, height=280)
 
         cname = opt[cid]["company_name"]
-        dname = st.text_input("세트 명칭", value=f"{cname} 경험 {er['obs'][:4]}", key="exp_name")
+        _yr = str(dt.date.today().year)
+        st.download_button("📥 산출된 경험율 엑셀 다운로드 (밴드별·연령별)",
+                           _build_experience_xlsx(res["bands"], rows, sm),
+                           file_name=f"경험퇴직률_{cname}_{_yr}.xlsx", key="exp_rate_dl")
+        dname = st.text_input("세트 명칭", value=f"{cname} 경험퇴직률 {_yr}", key="exp_name")
         if st.button("💾 경험 기초율 세트 저장", type="primary", key="exp_save"):
             store.add_base_rate_set(
-                DB_PATH, dname.strip() or f"{cname} 경험", "경험률", er["obs"][:4], "당기",
-                er["ret"], sm.get("avg_raise"),
+                DB_PATH, dname.strip() or f"{cname} 경험퇴직률", "경험률", _yr, "당기",
+                er["ret"], None,
                 json.dumps(rows, ensure_ascii=False),
-                f"경험데이터 산출 · 관측 {er['obs']} · 표본 {sm['n']}명 · 노출 {sm['exposure']}인년",
+                f"퇴직자명부 산출 · 퇴직 {sm['n_withdrawals']}건 · 노출 {sm['exposure']}인년 · 관측 {er['oy']:.0f}년",
                 user["id"], now(), company_id=cid, kind="experience")
             st.session_state.pop("exp_result", None)
-            st.success(f"✅ '{dname}' 경험 기초율 세트를 저장했습니다. 산출 설계에서 선택할 수 있습니다.")
+            st.success(f"✅ '{dname}' 경험 기초율 세트를 저장했습니다. 부채 산출에서 선택할 수 있습니다.")
             st.rerun()
 
     # 이 회사의 기존 경험세트
@@ -2615,9 +2816,25 @@ def _actuary_experience_rates(user, exp_stat):
             "ID": s["id"], "명칭": s["name"], "기준연도": s["base_year"], "정년": s["retirement_age"],
             "평균승급률(%)": round((s["avg_raise"] or 0) * 100, 2), "등록일": s["created"][:10],
         } for s in ex_sets]), width="stretch", hide_index=True)
+        _dlsel = st.selectbox("경험율 다운로드할 세트", [s["id"] for s in ex_sets],
+                              format_func=lambda i: next(f"[{i}] {s['name']}"
+                                                         for s in ex_sets if s["id"] == i),
+                              key="exp_dl_sel")
+        _dfull = store.get_base_rate_set(DB_PATH, _dlsel)
+        try:
+            _drows = json.loads(_dfull["data_json"]) if _dfull and _dfull.get("data_json") else []
+        except Exception:  # noqa: BLE001
+            _drows = []
+        if _drows:
+            st.download_button("📥 이 세트의 경험율 엑셀 다운로드",
+                               _build_experience_xlsx([], _drows),
+                               file_name=f"경험율_{_dfull['name']}.xlsx", key="exp_saved_dl")
         dsel = st.selectbox("경험세트 삭제", [0] + [s["id"] for s in ex_sets],
                             format_func=lambda i: "선택 안함" if i == 0 else f"[{i}]", key="exp_del_sel")
-        if dsel and st.button("🗑 선택 경험세트 삭제", key="exp_del"):
+        _exp_used = bool(dsel) and store.base_rate_set_in_use(DB_PATH, dsel)
+        if _exp_used:
+            st.caption("🔒 이 경험세트는 산출에 사용된 이력이 있어 삭제할 수 없습니다.")
+        if dsel and st.button("🗑 선택 경험세트 삭제", key="exp_del", disabled=_exp_used):
             store.delete_base_rate_set(DB_PATH, dsel)
             st.rerun()
 
@@ -2690,7 +2907,10 @@ def _actuary_dev_rates(user):
             rows = []
         st.dataframe(_rates_display_df(rows),
                      width="stretch", hide_index=True, height=280)
-        if st.button("🗑 이 세트 삭제", key="br_del"):
+        _set_used = store.base_rate_set_in_use(DB_PATH, sel)
+        if _set_used:
+            st.caption("🔒 이 세트는 산출에 사용된 이력이 있어 삭제할 수 없습니다(감사 추적 보존).")
+        if st.button("🗑 이 세트 삭제", key="br_del", disabled=_set_used):
             store.delete_base_rate_set(DB_PATH, sel)
             st.rerun()
 
@@ -2700,96 +2920,85 @@ DC_RATINGS = ["AA+", "AA", "AA-", "국공채", "기타"]
 
 
 def _actuary_discount(user):
-    st.subheader("할인율 관리")
-    st.caption("만기별 할인율(회사채 spot 커브)을 입력하면 **부채 현금흐름에 대해 "
-               "듀레이션이 반영된 단일할인율**을 산출합니다. "
-               "(커브로 할인한 부채 PV = 단일율로 할인한 PV 가 되는 flat rate)")
+    st.subheader("할인율 관리 — 연도별 공시 회사채 등급별·만기별 금리")
+    st.caption("금융투자협회 채권정보센터(KOFIA)·채권평가사가 **보고기간말 공시한 회사채 등급별·만기별 "
+               "수익률**을 입력·관리합니다. 여기 등록한 커브를 **부채 산출**에서 선택하면, 그 명부의 "
+               "현금흐름에 대해 **단일율 / 듀레이션 적용** 할인율로 자동 환산됩니다. "
+               "(할인율은 연도·등급별로 만기 커브 단위로 저장합니다.)")
 
-    c1, c2, c3, c4 = st.columns(4)
-    name = c1.text_input("커브 명칭", placeholder="예: 2025-12-31 AA+", key="dc_name")
-    vdate = c2.text_input("기준일", placeholder="2025-12-31", key="dc_vdate")
-    rating = c3.selectbox("등급", DC_RATINGS, key="dc_rating")
-    period = c4.selectbox("당기/전기", BR_PERIODS, key="dc_period")
-    timing_lbl = st.radio("할인 시점", TIMING_OPTS, horizontal=True, key="dc_timing")
-    timing = "end_of_year" if "연말" in timing_lbl else "mid_year"
+    st.markdown("**① 작성양식 다운로드 → 작성 후 업로드**")
+    st.download_button("📄 할인율 업로드 양식 다운로드", AF.build_discount_upload_template(),
+                       file_name="할인율_업로드양식.xlsx", key="dc_tmpl")
+    st.caption("양식 맨 위 **기준일**(예: 202512)을 채우면 그 날짜로 버전 저장됩니다. "
+               "당기/전기 구분은 여기서 하지 않고, 산출 화면에서 어떤 기준일 커브를 쓸지 선택합니다.")
+    up = st.file_uploader("작성한 할인율 양식 업로드 (기준일 + 등급별 만기·할인율)", type=["xlsx"], key="dc_up")
+    if up is not None:
+        try:
+            parsed = AF.parse_discount_upload(bytes(up.getbuffer()))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"양식을 읽을 수 없습니다: {e}")
+            parsed = None
+        if parsed:
+            _valid = {r: p for r, p in parsed["curves"].items() if len(p) >= 2}
+            if not _valid:
+                st.warning("등급별 만기·할인율을 2개 이상 채워 다시 올려주세요.")
+            else:
+                st.markdown(f"**미리보기** — 감지된 등급: {', '.join(_valid)}")
+                _bd = st.text_input("기준일 (엑셀에서 감지 · 필요 시 수정)",
+                                    value=str(parsed.get("기준일") or ""),
+                                    placeholder="예: 202512 또는 2025-12-31", key="dc_bdate_confirm")
+                if st.button("✅ 이 기준일로 등록", type="primary", key="dc_up_save"):
+                    bdate = _bd.strip()
+                    if not bdate:
+                        st.error("기준일을 입력하세요 (예: 202512).")
+                    else:
+                        for rating, pts in _valid.items():
+                            store.add_discount_curve(
+                                DB_PATH, f"{bdate} {rating}", bdate, rating, "",
+                                json.dumps(pts, ensure_ascii=False), None, None, "",
+                                user["id"], now())
+                        st.success(f"✅ 기준일 **{bdate}** · {len(_valid)}개 등급 커브를 등록했습니다.")
+                        st.rerun()
 
-    st.markdown("**① 만기별 할인율(spot 커브)** — 만기(년)·할인율(예 0.03123)")
-    curve_df = st.data_editor(
-        pd.DataFrame({"만기": list(range(1, 21)), "할인율": [None] * 20}),
-        num_rows="dynamic", width="stretch", key="dc_curve", height=280)
-
-    st.markdown("**② 부채 예상지급액(현금흐름)** — 연도·예상지급액 "
-                "(만기분석/엑셀에서 붙여넣기; 단일할인율은 현금흐름 '형태'로 결정)")
-    cf_df = st.data_editor(
-        pd.DataFrame({"연도": list(range(1, 21)), "예상지급액": [None] * 20}),
-        num_rows="dynamic", width="stretch", key="dc_cf", height=280)
-
-    def _curve_dict():
-        out = {}
-        for _, r in curve_df.iterrows():
-            try:
-                m = int(r["만기"]); v = float(r["할인율"])
-                if v > 0:
-                    out[m] = v
-            except (TypeError, ValueError):
-                continue
-        return out
-
-    def _cashflows():
-        out = []
-        for _, r in cf_df.iterrows():
-            try:
-                y = int(r["연도"]); a = float(r["예상지급액"])
-                if a:
-                    out.append((y, a))
-            except (TypeError, ValueError):
-                continue
-        return out
-
-    res = None
-    if st.button("🧮 단일할인율 산출", type="primary", key="dc_solve"):
-        curve = _curve_dict(); cf = _cashflows()
-        if len(curve) < 2:
-            st.error("만기별 할인율을 2개 이상 입력하세요.")
-        elif len(cf) < 2:
-            st.error("부채 예상지급액(현금흐름)을 2개 이상 입력하세요.")
-        else:
-            res = DISC.solve(cf, curve, timing)
-            st.session_state["dc_res"] = res
-            st.session_state["dc_res_curve"] = curve
-    res = res or st.session_state.get("dc_res")
-    if res:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("단일할인율", f"{res['single_rate']*100:.3f}%")
-        m2.metric("듀레이션(년)", f"{res['duration']:.2f}")
-        m3.metric("듀레이션 할인율", f"{res['duration_rate']*100:.3f}%")
-        m4.metric("커브 부채 PV", f"{res['curve_pv']:,.0f}")
-        if st.button("💾 커브·단일할인율 저장", key="dc_save"):
-            store.add_discount_curve(
-                DB_PATH, (name.strip() or f"{vdate} {rating}"), vdate, rating, period,
-                json.dumps([{"maturity": m, "rate": v} for m, v in
-                            sorted(st.session_state.get("dc_res_curve", {}).items())],
-                           ensure_ascii=False),
-                res["single_rate"], res["duration"], "", user["id"], now())
-            st.success("할인율 커브를 저장했습니다.")
-            st.rerun()
-
+    # ② 기준일(버전)별 조회 — 엑셀과 동일한 등급×만기 와이드 형식 + 삭제
     curves = store.list_discount_curves(DB_PATH)
-    st.markdown(f"**저장된 할인율 커브 ({len(curves)})**")
-    if curves:
-        st.dataframe(pd.DataFrame([{
-            "ID": c["id"], "명칭": c["name"], "기준일": c["valuation_date"], "등급": c["rating"],
-            "당기/전기": c["period_kind"],
-            "단일할인율(%)": round((c["single_rate"] or 0) * 100, 3),
-            "듀레이션": round(c["duration"] or 0, 2), "등록일": c["created"][:10],
-        } for c in curves]), width="stretch", hide_index=True)
-        dsel = st.selectbox("삭제할 커브", [c["id"] for c in curves],
-                            format_func=lambda i: next(f"[{c['id']}] {c['name']}"
-                                                       for c in curves if c["id"] == i),
-                            key="dc_delsel")
-        if st.button("🗑 커브 삭제", key="dc_del"):
-            store.delete_discount_curve(DB_PATH, dsel)
-            st.rerun()
+    st.markdown(f"**② 등록된 공시 금리 — 기준일(버전)별 관리 · 총 {len(curves)}개 커브**")
+    if not curves:
+        st.info("아직 등록된 공시 금리가 없습니다. 위 양식을 내려받아 작성·업로드하세요.")
+        return
+    _versions = sorted({c["valuation_date"] for c in curves}, reverse=True)
+    vpick = st.selectbox("기준일(버전) 선택", _versions,
+                         format_func=lambda v: f"기준일 {v}", key="dc_vpick")
+    _vcurves = [c for c in curves if c["valuation_date"] == vpick]
+    st.markdown(f"##### 📅 기준일 {vpick}  ·  등급 {len(_vcurves)}종")
+    st.caption("업로드 엑셀과 동일 형식 (행=만기, 열=등급)")
+    # 등급×만기 피벗 (엑셀 형식) — 당기/전기 표기 없이 등급만
+    wide = {}
+    all_mats = set()
+    for c in _vcurves:
+        full = store.get_discount_curve(DB_PATH, c["id"])
+        try:
+            pts = json.loads(full["curve_json"]) if full and full.get("curve_json") else []
+        except Exception:  # noqa: BLE001
+            pts = []
+        col = c["rating"]
+        wide[col] = {int(p["maturity"]): round(float(p["rate"]) * 100, 3) for p in pts}
+        all_mats.update(wide[col].keys())
+    if all_mats:
+        rows = [{"만기(년)": m, **{col: wide[col].get(m) for col in wide}}
+                for m in sorted(all_mats)]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420)
+    dsel = st.selectbox(
+        "삭제할 커브", [c["id"] for c in curves],
+        format_func=lambda i: next(
+            f"[{c['id']}] 기준일 {c['valuation_date']} · {c['rating']}"
+            for c in curves if c["id"] == i), key="dc_delsel")
+    _dsel_used = store.discount_curve_in_use(DB_PATH, dsel)
+    if _dsel_used:
+        st.caption("🔒 이 커브는 산출에 사용된 이력이 있어 삭제할 수 없습니다(감사 추적 보존).")
+    if st.button("🗑 선택 커브 삭제", key="dc_del", disabled=_dsel_used):
+        store.delete_discount_curve(DB_PATH, dsel)
+        st.rerun()
 
 
 def _actuary_edit_rows(user, sub, df, report, sid):
@@ -2919,15 +3128,64 @@ def _actuary_census_view(user, sub, sid):
             if p.exists():
                 st.download_button(f"⬇ [{f['census_type']}] {f['filename']}", p.read_bytes(),
                                    file_name=f["filename"], key=f"auxa_{f['id']}")
-    olt = store.get_other_lt(DB_PATH, sub["company_id"])
-    if olt and olt.get("rules_json"):
-        try:
-            rr = json.loads(olt["rules_json"])
-        except Exception:
-            rr = []
-        if rr:
-            st.markdown("**기타장기종업원급여 지급규정**")
-            st.dataframe(pd.DataFrame(rr), width="stretch", hide_index=True)
+
+
+def _build_discount_basis_xlsx(sub, curve_id, disc_method, timing, salary, ret_age, val_date):
+    """할인율 기초데이터 엑셀 — ①예상퇴직급여 지급액 ②단일율 찾기 산출근거.
+
+    이 명부의 현금흐름(만기분석)과 선택 커브로 단일율/듀레이션 할인율 산출 과정을 담는다.
+    현금흐름 산출용 기초율은 표준(CSV) 테이블 기준(단일율은 현금흐름 '형태'로 결정되므로 충분).
+    """
+    import io as _io
+    from openpyxl import Workbook
+    from dbo.engine import expected_cashflows
+    from dbo import discount as _D
+
+    records, _rep, _ = load_census(sub["stored_path"], column_map=COLMAP)
+    cfg = Config.from_dict({
+        "valuation_date": val_date.isoformat(), "discount_rate": 0.045,
+        "salary_increase_rate": salary, "retirement_age": ret_age,
+        "decrement_timing": timing, "discount_timing": timing})
+    tables = DecrementTables.from_config(cfg, base_dir=str(CONFIG_DIR))
+    cfdf = expected_cashflows(records, cfg, tables)
+    crow = store.get_discount_curve(DB_PATH, curve_id)
+    try:
+        curve = {int(x["maturity"]): float(x["rate"]) for x in json.loads(crow["curve_json"])}
+    except Exception:  # noqa: BLE001
+        curve = {}
+    cflist = [(int(r["연도"]), float(r["기대급여지급액"]))
+              for _, r in cfdf.iterrows() if r["기대급여지급액"]]
+    solved = (_D.solve(cflist, curve, timing)
+              if len(curve) >= 2 and len(cflist) >= 2 else None)
+
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "예상퇴직급여지급액"
+    ws1.append(["연도", "예상퇴직급여 지급액"])
+    for _, r in cfdf.iterrows():
+        ws1.append([int(r["연도"]), round(float(r["기대급여지급액"]))])
+
+    ws2 = wb.create_sheet("단일율 산출근거")
+    ws2.append([f"커브: {crow['name'] if crow else '-'} · 방법: {disc_method} · 시점: {timing}"])
+    ws2.append(["연도", "예상지급액(현금흐름)", "커브 spot금리(%)", "할인기간(년)",
+                "커브 할인계수", "커브 현재가치"])
+    for yr, cf in cflist:
+        sp = _D._spot(curve, yr) if curve else 0.0
+        exn = _D._exponent(yr, timing)
+        df = 1 / (1 + sp) ** exn if sp else 0.0
+        ws2.append([yr, round(cf), round(sp * 100, 4), round(exn, 2),
+                    round(df, 6), round(cf * df)])
+    if solved:
+        ws2.append([])
+        ws2.append(["단일할인율(%)", round(solved["single_rate"] * 100, 4)])
+        ws2.append(["듀레이션(년)", round(solved["duration"], 3)])
+        ws2.append(["듀레이션 할인율(%)", round(solved["duration_rate"] * 100, 4)])
+        ws2.append(["커브 부채 PV", round(solved["curve_pv"])])
+        _applied = solved["duration_rate"] if disc_method == "듀레이션 적용" else solved["single_rate"]
+        ws2.append(["→ 적용 할인율(%)", round(_applied * 100, 4)])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def _actuary_work_detail(user, sid):
@@ -2976,16 +3234,24 @@ def _actuary_work_detail(user, sid):
                                       note=memo)
             st.success("저장했습니다."); st.rerun()
 
-    # 조회 4종 — 제도·운영현황은 기업화면과 동일 내용, 명부조회는 산출 기본정보·오류·재업로드
-    with st.expander("📋 제도조회 (기업 입력내용)", expanded=False):
-        _plan_readonly(sub["company_id"])
-    with st.expander("📊 운영현황조회 (사외적립자산 현황)", expanded=False):
-        _funding_readonly(sub["company_id"])
-    with st.expander("📁 명부조회 (산출 기본정보·오류·재업로드)", expanded=False):
+    # ── A. 기업체 입력한 사항 (기업 입력내용 조회·확인) ──
+    _cid = sub["company_id"]
+    st.markdown("#### A. 기업체 입력한 사항")
+    with st.expander("① 📋 제도조회 (기업 입력내용)", expanded=False):
+        _plan_readonly(_cid)
+    with st.expander("② 📁 명부조회 (산출 기본정보·오류·재업로드)", expanded=False):
         _actuary_census_view(user, sub, sid)
-    with st.expander("📎 지난보고서조회", expanded=False):
-        pr = store.get_prior_record(DB_PATH, sub["company_id"])
-        pfiles = store.list_prior_files(DB_PATH, sub["company_id"])
+    with st.expander("③ 📊 기업 제공 기초율 (할인율·임금인상율·사외적립율)", expanded=False):
+        _actuary_basis_readonly(_cid)
+    with st.expander("④ 🎖 기타장기", expanded=False):
+        _client_other_lt(user, company_id=_cid, kp="act_")
+    with st.expander("⑤ 📑 명부확인용 요약표", expanded=False):
+        _client_census_summary(user, company_id=_cid, kp="act_")
+    with st.expander("⑥ 💰 사외적립자산", expanded=False):
+        _client_operation_status(user, company_id=_cid, kp="act_")
+    with st.expander("⑦ 📎 지난보고서조회", expanded=False):
+        pr = store.get_prior_record(DB_PATH, _cid)
+        pfiles = store.list_prior_files(DB_PATH, _cid)
         if pr:
             st.write({k: pr[k] for k in store.PRIOR_FIELDS if pr.get(k) not in (None, "", 0.0)})
         for f in pfiles:
@@ -2997,28 +3263,174 @@ def _actuary_work_detail(user, sid):
             st.info("등록된 과거 자료가 없습니다.")
 
     st.divider()
-    st.markdown("#### 가정설계")
+    st.markdown("#### B. 부채 산출")
+    # 할인율·임금상승율·정년은 기업체 입력값을 디폴트로 하되 계리사가 변경 가능
+    _pi_b, _d_b = _plan_detail(_cid)
+    _bu_prop = float(_d_b.get("baseup_proposed") or 0.0)
+    _bu_vals = [float(v) for v in (_d_b.get("baseup") or {}).values() if v]
+    _sal_default = _bu_prop if _bu_prop else (
+        round(sum(_bu_vals) / len(_bu_vals), 2) if _bu_vals else 3.0)
+    _disc_basis = _d_b.get("discount_basis") or "-"
+    _ret_default = int(_pi_b.get("retirement_age") or 60)
+    st.caption(f"※ 기업 입력값 기준 — 할인율 산출기준: **{_disc_basis}** · "
+               f"임금인상율(제안/평균): **{_sal_default:.2f}%** · 정년: **{_ret_default}세**. "
+               "아래에서 계리사가 변경할 수 있습니다.")
+    _prior_rec = store.get_prior_record(DB_PATH, _cid) or {}
+    _prior_sal_default = float(_prior_rec.get("prior_salary_rate") or 0.0)
     c1, c2, c3, c4 = st.columns(4)
     val_date = c1.date_input("산출기준일", dt.date.fromisoformat(sub["valuation_date"]))
-    discount = c2.number_input("할인율 (%)", value=4.5, step=0.1) / 100
-    salary = c3.number_input("임금상승율 (%)", value=3.0, step=0.1) / 100
-    ret_age = c4.number_input("정년", value=60, step=1)
+    salary = c2.number_input("1. 적용 임금상승율 (%)", value=float(_sal_default), step=0.1,
+                             help="기업 제공 임금인상율(제안 또는 과거5년 평균)이 기본값. 계리사가 변경 가능.") / 100
+    prior_salary = c3.number_input("전기 임금상승율 (%)", value=_prior_sal_default, step=0.1,
+                                   key=f"priorsal_{sid}",
+                                   help="전기 평가 시 적용했던 임금상승율. 전기가정 PBO(가정변경 효과) 비교에 사용됩니다.") / 100
+    ret_age = c4.number_input("정년", value=_ret_default, step=1)
     _tcur = _plan_timing(sub["company_id"])
     timing_lbl = st.radio("탈퇴·지급 시점 (할인 기준)", TIMING_OPTS,
                           index=(1 if _tcur == "end_of_year" else 0), horizontal=True,
                           key=f"timing_{sid}",
-                          help="연중(mid-year): 연중 탈퇴·지급 가정, 반기 할인 — 한국 실무 표준·기본값. "
-                               "/ 연말(end-of-year): 연말 시점 할인.")
+                          help="연중(mid-year): 한국 실무 표준·기본값 / 연말(end-of-year): 연말 시점 할인.")
     run_timing = "end_of_year" if "연말" in timing_lbl else "mid_year"
 
-    # 기초율 세트·할인율 커브 선택 (마스터 데이터 연동) — 이 회사 경험세트 + 공용 개발원세트
+    # 2. 적용 할인율 — 산출방법(단일율/듀레이션) + 당기/전기 커브
+    st.markdown("**2. 적용 할인율**")
+    _curves = store.list_discount_curves(DB_PATH)     # 당기/전기 구분 없이 전체(기준일·등급)
+    disc_method = st.radio("적용 할인율 산출 방법", ["단일율", "듀레이션 적용"], horizontal=True,
+                           key=f"discm_{sid}",
+                           help="단일율: 커브PV = 단일율PV 가 되는 flat rate. "
+                                "/ 듀레이션 적용: 듀레이션 시점의 커브 금리.")
+
+    def _curve_pts(cid):
+        crow = store.get_discount_curve(DB_PATH, cid) if cid else None
+        try:
+            return json.loads(crow["curve_json"]) if crow and crow.get("curve_json") else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _cashflows_cached():
+        ck = f"cf_{sid}_{salary:.5f}_{ret_age}_{run_timing}_{val_date.isoformat()}"
+        if ck in st.session_state:
+            return st.session_state[ck]
+        try:
+            from dbo.engine import expected_cashflows
+            _recs, _r, _ = load_census(sub["stored_path"], column_map=COLMAP)
+            _cfg0 = Config.from_dict({"valuation_date": val_date.isoformat(), "discount_rate": 0.045,
+                                      "salary_increase_rate": salary, "retirement_age": ret_age,
+                                      "decrement_timing": run_timing, "discount_timing": run_timing})
+            _tb = DecrementTables.from_config(_cfg0, base_dir=str(CONFIG_DIR))
+            _cfdf = expected_cashflows(_recs, _cfg0, _tb)
+            cfl = [(int(r["연도"]), float(r["기대급여지급액"]))
+                   for _, r in _cfdf.iterrows() if r["기대급여지급액"]]
+        except Exception:  # noqa: BLE001
+            cfl = []
+        st.session_state[ck] = cfl
+        return cfl
+
+    def _solve_pts(pts):
+        if not pts:
+            return None
+        curve = {int(p["maturity"]): float(p["rate"]) for p in pts}
+        cfl = _cashflows_cached()
+        if len(curve) >= 2 and len(cfl) >= 2:
+            return DISC.solve(cfl, curve, run_timing)
+        return None
+
+    def _show_curve(pts, label):
+        if not pts:
+            return None
+        cc1, cc2 = st.columns([1, 1])
+        cc1.caption(f"{label} 만기별 금리")
+        cc1.dataframe(pd.DataFrame([{"만기(년)": p["maturity"],
+                                     "할인율(%)": round(float(p["rate"]) * 100, 3)} for p in pts]),
+                      width="stretch", hide_index=True, height=180)
+        sol = _solve_pts(pts)
+        if sol:
+            applied = sol["duration_rate"] if disc_method == "듀레이션 적용" else sol["single_rate"]
+            cc2.metric(f"{label} 단일할인율", f"{sol['single_rate']*100:.3f}%")
+            cc2.caption(f"듀레이션 {sol['duration']:.2f}년 · 듀레이션율 {sol['duration_rate']*100:.3f}%\n\n"
+                        f"**→ 적용({disc_method}) {applied*100:.3f}%**")
+        return sol
+
+    _basis_rating = (_disc_basis or "").replace("회사채", "").strip()
+
+    def _resolve(vdate, rating):
+        return next((c["id"] for c in _curves
+                     if c["valuation_date"] == vdate and c["rating"] == rating), 0)
+
+    # ① 당기 할인율 — 기준일 + 등급 선택(등급 기본=기업 제공)
+    st.markdown("**① 당기 할인율** — 기준일·등급 선택 (엑셀에서 등급에 맞는 커브를 찾아 사용)")
+    curve_id = 0
+    if _curves:
+        _vers = sorted({c["valuation_date"] for c in _curves}, reverse=True)
+        d1, d2 = st.columns(2)
+        cur_ver = d1.selectbox("당기 기준일", _vers, format_func=lambda v: f"기준일 {v}", key=f"curver_{sid}")
+        _ratings = [c["rating"] for c in _curves if c["valuation_date"] == cur_ver]
+        _ri = _ratings.index(_basis_rating) if _basis_rating in _ratings else 0
+        cur_rating = d2.selectbox("당기 등급", _ratings, index=_ri, key=f"currt_{sid}",
+                                  help=f"기업 제공 할인율 기준등급 **{_basis_rating or '-'}** 이 기본 선택됩니다.")
+        curve_id = _resolve(cur_ver, cur_rating)
+        if _basis_rating and cur_rating == _basis_rating:
+            st.caption(f"✅ 기업 제공 등급({_basis_rating}) · 기준일 {cur_ver} 커브를 사용합니다.")
+        _show_curve(_curve_pts(curve_id), "당기")
+    else:
+        st.warning("‘할인율 관리’에 등록된 공시 금리가 없습니다. 상단 **할인율 관리**에서 먼저 등록하세요.")
+
+    # ② 전기 할인율 — 등록 커브 선택 또는 엑셀 업로드(양식 제공)
+    st.markdown("**② 전기 할인율** — 등록 커브 선택 또는 엑셀 업로드 (전기 대비 분석용)")
+    _pri_mode = st.radio("전기 할인율 방식", ["할인율 관리에서 선택", "엑셀 업로드"],
+                         horizontal=True, key=f"primode_{sid}")
+    prior_pts = None
+    if _pri_mode == "할인율 관리에서 선택":
+        if _curves:
+            _pvers = sorted({c["valuation_date"] for c in _curves}, reverse=True)
+            p1, p2 = st.columns(2)
+            pri_ver = p1.selectbox("전기 기준일", _pvers, format_func=lambda v: f"기준일 {v}", key=f"priver_{sid}")
+            _pr = [c["rating"] for c in _curves if c["valuation_date"] == pri_ver]
+            _pri = _pr.index(_basis_rating) if _basis_rating in _pr else 0
+            pri_rating = p2.selectbox("전기 등급", _pr, index=_pri, key=f"prirt_{sid}")
+            prior_pts = _curve_pts(_resolve(pri_ver, pri_rating))
+        else:
+            st.caption("등록된 커브가 없습니다. 엑셀 업로드를 이용하세요.")
+    else:
+        st.download_button("📄 전기 할인율 업로드 양식(만기·할인율)", AF.build_simple_curve_template(),
+                           file_name="전기할인율_양식.xlsx", key=f"pritmpl_{sid}")
+        _pf = st.file_uploader("전기 할인율 엑셀 업로드", type=["xlsx"], key=f"dcpriup_{sid}")
+        if _pf is not None:
+            try:
+                prior_pts = AF.parse_simple_curve(bytes(_pf.getbuffer()))
+                st.session_state[f"prior_pts_{sid}"] = prior_pts
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"전기 할인율 파일을 읽을 수 없습니다: {_e}")
+        prior_pts = prior_pts or st.session_state.get(f"prior_pts_{sid}")
+    _show_curve(prior_pts, "전기")
+
+    discount = 0.045      # 내부 기본값(커브 미선택 시 폴백). 화면 직접입력은 제거됨.
+
+    # ── 자동 산출 기초데이터 엑셀 다운로드 (①예상퇴직급여 지급액 ②단일율 산출근거) ──
+    st.markdown("**자동 산출 기초데이터 조회(엑셀)** — ① 예상퇴직급여 지급액 · ② 단일율 찾기 산출근거")
+    if not curve_id:
+        st.caption("당기 할인율 커브가 선택되면 기초데이터 엑셀을 생성할 수 있습니다.")
+    else:
+        if st.button("🧮 기초데이터 생성", key=f"dcdl_{sid}"):
+            try:
+                st.session_state[f"dcxls_{sid}"] = _build_discount_basis_xlsx(
+                    sub, curve_id, disc_method, run_timing, salary, ret_age, val_date)
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"기초데이터 생성 실패: {_e}")
+        _xls = st.session_state.get(f"dcxls_{sid}")
+        if _xls:
+            st.download_button("📥 할인율 기초데이터 엑셀 다운로드", _xls,
+                               file_name=f"할인율기초데이터_{sub['company_name']}_{sub['valuation_date']}.xlsx",
+                               key=f"dcdl2_{sid}")
+
+    # 기초율 세트 선택 (마스터 데이터 연동) — 이 회사 경험세트 + 공용 개발원세트
     _brsets = store.list_base_rate_sets(DB_PATH, company_id=sub["company_id"])
-    _dccurves = store.list_discount_curves(DB_PATH)
-    bcol, dcol = st.columns(2)
+    st.markdown("**3. 적용 기초율(탈퇴·사망·승급률)**")
+    bcol = st.container()
     # 적용 기초율 = (세트 + 300인 밴드)를 하나의 선택지로. 재직자수로 밴드 자동 세팅.
     _nrec = sub.get("n_records") or 0
     _auto_band = "ge300" if _nrec >= 300 else "lt300"
-    _br_opts = [{"key": "base:lt300", "label": "기본(CSV 표준 테이블)", "set_id": 0, "band": "lt300"}]
+    _br_opts = []
     for s in _brsets:
         if s.get("kind") == "experience":
             _br_opts.append({"key": f"{s['id']}:exp", "label": f"📈 {s['name']} · 경험률",
@@ -3037,6 +3449,13 @@ def _actuary_work_detail(user, sid):
         else:
             _br_opts.append({"key": f"{s['id']}:single", "label": s["name"],
                              "set_id": s["id"], "band": "lt300"})
+    # 개발원·경험 세트가 하나라도 있으면 그중에서 선택. 전혀 없을 때만 임시 샘플값 폴백.
+    if not _br_opts:
+        _br_opts = [{"key": "base:lt300", "label": "기본 샘플값(테스트용 · 정식 산출 아님)",
+                     "set_id": 0, "band": "lt300"}]
+        st.warning("⚠️ 등록된 **개발원 기초율·경험 기초율 세트가 없습니다.** 지금은 임시 샘플값으로만 "
+                   "계산됩니다(정식 산출 아님). 상단 **기초율 관리**에서 개발원 세트를 등록하거나, "
+                   "**경험 기초율**을 산출·저장한 뒤 선택하세요.")
     # 디폴트: 이 회사 경험세트가 있으면 그것(경험율 우선 선택), 없으면 최신 개발원세트 + 재직자수 밴드
     _keys = [o["key"] for o in _br_opts]
     _exp_first = next((s["id"] for s in _brsets if s.get("kind") == "experience"), None)
@@ -3061,12 +3480,6 @@ def _actuary_work_detail(user, sid):
         bcol.caption("📈 이 기업의 경험 기초율이 등록되어 있어 기본으로 선택되었습니다.")
     base_set_id = _optmap[_sel_key]["set_id"]
     size_band = _optmap[_sel_key]["band"]
-    _dcopts = {0: "직접입력(위 할인율 사용)"}
-    _dcopts.update({c["id"]: f"[{c['id']}] {c['name']} · 단일 {(c['single_rate'] or 0)*100:.3f}%"
-                    for c in _dccurves})
-    curve_id = dcol.selectbox("할인율 커브", list(_dcopts), format_func=lambda i: _dcopts[i],
-                              key=f"dcsel_{sid}",
-                              help="커브를 선택하면 이 명부의 현금흐름으로 듀레이션 반영 단일할인율을 자동 산출해 적용합니다.")
 
     # 주석공시 조정내역용 회사 재무자료 (사외적립자산·기여금·전기값·재측정손익)
     _dsv = store.get_disclosure_inputs(DB_PATH, sid) or {}
@@ -3110,6 +3523,10 @@ def _actuary_work_detail(user, sid):
     rc1, rc2 = st.columns([1, 2])
     run = rc1.button("🟨 계산 실행 (시뮬레이션)", type="primary", key=f"run_{sid}")
     force = rc2.checkbox("오류가 있어도 이대로 계산 (유효한 레코드만 사용)", key=f"force_{sid}")
+    if run and not curve_id:
+        st.error("**당기 할인율 커브**를 먼저 선택하세요 (할인율 관리에 등록된 기준일·등급). "
+                 "할인율이 정해져야 계산할 수 있습니다.")
+        run = False
     if run:
         _timing = run_timing
         records, report, _ = load_census(sub["stored_path"], column_map=COLMAP)
@@ -3121,13 +3538,20 @@ def _actuary_work_detail(user, sid):
                 "decrement_timing": _timing, "discount_timing": _timing,
             })
 
+        def _mkcfg_sal(sal, rate):
+            return Config.from_dict({
+                "valuation_date": val_date.isoformat(), "discount_rate": rate,
+                "salary_increase_rate": sal, "retirement_age": ret_age,
+                "decrement_timing": _timing, "discount_timing": _timing,
+            })
+
         # 기초율: 선택 세트 → DecrementTables (미선택 시 CSV 표준). 300인 밴드 반영.
         if base_set_id:
             tables = _tables_from_base_set(base_set_id, size_band)
         else:
             tables = DecrementTables.from_config(_mkcfg(discount), base_dir=str(CONFIG_DIR))
 
-        # 할인율: 커브 선택 시 이 명부 현금흐름으로 단일할인율 자동 산출
+        # 할인율: 커브 선택 시 이 명부 현금흐름으로 산출방법(단일율/듀레이션)에 따라 자동 산출
         disc_rate = discount
         if curve_id:
             from dbo.engine import expected_cashflows
@@ -3141,9 +3565,15 @@ def _actuary_work_detail(user, sid):
             cflist = [(int(r["연도"]), float(r["기대급여지급액"]))
                       for _, r in cfdf.iterrows() if r["기대급여지급액"]]
             if len(curve) >= 2 and len(cflist) >= 2:
-                disc_rate = DISC.single_equivalent_rate(cflist, curve, _timing)
-                st.info(f"할인율 커브 '{crow['name']}' 적용 → 듀레이션 반영 **단일할인율 "
-                        f"{disc_rate*100:.3f}%** 자동 산출 (직접입력 할인율 대신 사용)")
+                _solved = DISC.solve(cflist, curve, _timing)
+                if disc_method == "듀레이션 적용":
+                    disc_rate = _solved["duration_rate"]
+                    _mlbl = f"듀레이션({_solved['duration']:.2f}년) 적용 할인율"
+                else:
+                    disc_rate = _solved["single_rate"]
+                    _mlbl = "단일율(듀레이션 반영)"
+                st.info(f"할인율 커브 '{crow['name']}' · **{_mlbl} {disc_rate*100:.3f}%** "
+                        "자동 산출 (직접입력 할인율 대신 사용)")
             else:
                 st.warning("커브 또는 현금흐름이 부족해 직접입력 할인율을 사용합니다.")
 
@@ -3185,6 +3615,25 @@ def _actuary_work_detail(user, sid):
                                                ret_age, sub["company_id"])
             if base_set_id:
                 _metrics["base_rates"] = _base_set_snapshot(base_set_id, size_band)
+            # 전기가정 PBO — 전기 임금상승율 + 전기 할인율(단일율)로 동일 명부 재산출(가정변경 효과)
+            if prior_pts and len(prior_pts) >= 2:
+                try:
+                    from dbo.engine import expected_cashflows as _ecf
+                    _pcurve = {int(p["maturity"]): float(p["rate"]) for p in prior_pts}
+                    _pcfdf = _ecf(records, _mkcfg_sal(prior_salary, disc_rate), tables)
+                    _pcfl = [(int(r["연도"]), float(r["기대급여지급액"]))
+                             for _, r in _pcfdf.iterrows() if r["기대급여지급액"]]
+                    if len(_pcfl) >= 2:
+                        _psolved = DISC.solve(_pcfl, _pcurve, _timing)
+                        _pdisc = (_psolved["duration_rate"] if disc_method == "듀레이션 적용"
+                                  else _psolved["single_rate"])
+                        _pres = calculate_census(records, _mkcfg_sal(prior_salary, _pdisc),
+                                                 tables, with_detail=False)
+                        _metrics["prior_assumption"] = {
+                            "pbo": float(_pres.total_dbo), "salary": float(prior_salary),
+                            "discount": float(_pdisc)}
+                except Exception:  # noqa: BLE001
+                    pass
             store.save_result_metrics(DB_PATH, rid, _metrics)
             _ver = store.mark_calculated(DB_PATH, sid, now())
             # 검토요청/검토완료 건을 재계산하면 검토상태가 초기화됨 → 다음 렌더에서 안내
