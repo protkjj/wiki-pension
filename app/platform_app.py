@@ -3118,16 +3118,31 @@ def _actuary_census_view(user, sub, sid):
             st.success(f"명부를 갱신했습니다. ({rep.n_records}명, 오류 {len(rep.errors)}·경고 {len(rep.warnings)})")
             st.rerun()
 
-    # 보조 명부 + 기타장기 규정
+    # 기업이 올린 나머지 명부 전체 — 화면 미리보기 + 다운로드
     aux = [a for a in store.list_aux_census(DB_PATH, sub["company_id"])
            if a["census_type"] != "누진제규정서류"]
-    if aux:
-        st.markdown("**보조 명부 (퇴직자·전기말·전출입·기타장기 등)**")
-        for f in aux:
-            p = Path(f["stored_path"])
-            if p.exists():
-                st.download_button(f"⬇ [{f['census_type']}] {f['filename']}", p.read_bytes(),
-                                   file_name=f["filename"], key=f"auxa_{f['id']}")
+    st.divider()
+    st.markdown(f"**📚 기업이 올린 그 밖의 명부·자료 ({len(aux)}건)** — 재직자명부 외 전부 조회 가능")
+    if not aux:
+        st.caption("재직자명부 외에 올린 자료가 없습니다.")
+    for f in aux:
+        p = Path(f["stored_path"])
+        with st.expander(f"📄 [{f['census_type']}] {f['filename']}  ·  {f.get('created','')[:16]}",
+                         expanded=False):
+            if not p.exists():
+                st.warning("파일을 찾을 수 없습니다(서버에서 삭제됨).")
+                continue
+            st.download_button("⬇ 다운로드", p.read_bytes(), file_name=f["filename"],
+                               key=f"auxa_{f['id']}")
+            try:
+                if str(p).lower().endswith(".csv"):
+                    _prev = pd.read_csv(p, dtype=str)
+                else:
+                    _prev = pd.read_excel(p, dtype=str, header=None)
+                st.caption(f"미리보기 (상위 30행 · 총 {len(_prev)}행)")
+                st.dataframe(_prev.head(30).fillna(""), width="stretch", hide_index=True)
+            except Exception as _e:  # noqa: BLE001
+                st.caption(f"미리보기를 표시할 수 없습니다: {_e}")
 
 
 def _build_discount_basis_xlsx(sub, curve_id, disc_method, timing, salary, ret_age, val_date):
@@ -3146,7 +3161,15 @@ def _build_discount_basis_xlsx(sub, curve_id, disc_method, timing, salary, ret_a
         "valuation_date": val_date.isoformat(), "discount_rate": 0.045,
         "salary_increase_rate": salary, "retirement_age": ret_age,
         "decrement_timing": timing, "discount_timing": timing})
-    tables = DecrementTables.from_config(cfg, base_dir=str(CONFIG_DIR))
+    # 선택된 ③적용 기초율 세트로 현금흐름 산출(경험세트 선택 시 경험 퇴직율 반영)
+    _sel = st.session_state.get(f"brsel_{sub['id']}")
+    _bsid, _bband = 0, "lt300"
+    if _sel and ":" in str(_sel):
+        _p, _b = str(_sel).rsplit(":", 1)
+        if _p.isdigit():
+            _bsid = int(_p); _bband = _b if _b in ("lt300", "ge300") else "lt300"
+    tables = (_tables_from_base_set(_bsid, _bband) if _bsid
+              else DecrementTables.from_config(cfg, base_dir=str(CONFIG_DIR)))
     cfdf = expected_cashflows(records, cfg, tables)
     crow = store.get_discount_curve(DB_PATH, curve_id)
     try:
@@ -3307,8 +3330,18 @@ def _actuary_work_detail(user, sid):
         except Exception:  # noqa: BLE001
             return []
 
+    def _selected_base():
+        """③적용 기초율 선택값(직전 렌더)에서 (set_id, band) 파싱. 미선택/기본은 (0,'lt300')."""
+        sel = st.session_state.get(f"brsel_{sid}")
+        if sel and ":" in str(sel):
+            p, b = str(sel).rsplit(":", 1)
+            if p.isdigit():
+                return int(p), (b if b in ("lt300", "ge300") else "lt300")
+        return 0, "lt300"
+
     def _cashflows_cached():
-        ck = f"cf_{sid}_{salary:.5f}_{ret_age}_{run_timing}_{val_date.isoformat()}"
+        _bsid, _bband = _selected_base()
+        ck = f"cf_{sid}_{salary:.5f}_{ret_age}_{run_timing}_{val_date.isoformat()}_{_bsid}_{_bband}"
         if ck in st.session_state:
             return st.session_state[ck]
         try:
@@ -3317,7 +3350,8 @@ def _actuary_work_detail(user, sid):
             _cfg0 = Config.from_dict({"valuation_date": val_date.isoformat(), "discount_rate": 0.045,
                                       "salary_increase_rate": salary, "retirement_age": ret_age,
                                       "decrement_timing": run_timing, "discount_timing": run_timing})
-            _tb = DecrementTables.from_config(_cfg0, base_dir=str(CONFIG_DIR))
+            _tb = (_tables_from_base_set(_bsid, _bband) if _bsid
+                   else DecrementTables.from_config(_cfg0, base_dir=str(CONFIG_DIR)))
             _cfdf = expected_cashflows(_recs, _cfg0, _tb)
             cfl = [(int(r["연도"]), float(r["기대급여지급액"]))
                    for _, r in _cfdf.iterrows() if r["기대급여지급액"]]
@@ -3480,6 +3514,22 @@ def _actuary_work_detail(user, sid):
         bcol.caption("📈 이 기업의 경험 기초율이 등록되어 있어 기본으로 선택되었습니다.")
     base_set_id = _optmap[_sel_key]["set_id"]
     size_band = _optmap[_sel_key]["band"]
+    # 적용 기초율(연령별 퇴직·사망·승급률) 조회·다운로드 — 산출 검증용
+    if base_set_id:
+        _bfull = store.get_base_rate_set(DB_PATH, base_set_id)
+        try:
+            _brows = json.loads(_bfull["data_json"]) if _bfull and _bfull.get("data_json") else []
+        except Exception:  # noqa: BLE001
+            _brows = []
+        if _brows:
+            import io as _io2
+            _bio = _io2.BytesIO()
+            _rates_display_df(_brows).to_excel(_bio, index=False)
+            bcol.download_button("⬇ 적용 기초율(연령별) 다운로드", _bio.getvalue(),
+                                 file_name=f"적용기초율_{_optmap[_sel_key]['label']}.xlsx",
+                                 key=f"brdl_{sid}")
+            with bcol.expander("적용 기초율 미리보기(연령별)", expanded=False):
+                st.dataframe(_rates_display_df(_brows), width="stretch", hide_index=True, height=260)
 
     # 주석공시 조정내역용 회사 재무자료 (사외적립자산·기여금·전기값·재측정손익)
     _dsv = store.get_disclosure_inputs(DB_PATH, sid) or {}
