@@ -182,6 +182,13 @@ CREATE TABLE IF NOT EXISTS funding_status (
     updated TEXT,
     FOREIGN KEY (company_id) REFERENCES companies(id)
 );
+CREATE TABLE IF NOT EXISTS census_summary (
+    company_id INTEGER PRIMARY KEY,         -- 명부확인용 요약표(업로드 결과)
+    data_json TEXT,                         -- 자동산출값+회사입력값(JSON)
+    updated_by INTEGER,
+    updated TEXT,
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
 CREATE TABLE IF NOT EXISTS base_rate_sets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,   -- 기초율 세트(버전) — 계리사 마스터 데이터
     name TEXT NOT NULL,                     -- 세트 명칭

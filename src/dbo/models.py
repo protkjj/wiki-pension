@@ -81,6 +81,29 @@ class Employee(BaseModel):
     )
     multiplier: float = Field(1.0, description="적용배수 (기본 1.0)")
 
+    @field_validator("plan_type", mode="before")
+    @classmethod
+    def _default_plan_type(cls, v):
+        """제도구분 빈칸 처리 — 구분이 없으면 비우라고 안내하므로 빈값은 기본(1=DB정상)으로.
+
+        엑셀에서 1.0 같은 float으로 들어오거나 문자열 '1'로 들어와도 정수로 정규화한다.
+        """
+        if v is None:
+            return PlanType.DB_NORMAL
+        if isinstance(v, str):
+            s = v.strip()
+            if s == "":
+                return PlanType.DB_NORMAL
+            try:
+                return int(float(s))
+            except ValueError:
+                return v
+        if isinstance(v, float):
+            if v != v:               # NaN
+                return PlanType.DB_NORMAL
+            return int(v)
+        return v
+
     @field_validator("birth_date", "hire_date", "interim_settlement_date", mode="before")
     @classmethod
     def _flex_date(cls, v):

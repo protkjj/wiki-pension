@@ -672,6 +672,31 @@ def save_other_lt(db_path, company_id: int, rules_json: str, note: str,
         conn.close()
 
 
+def get_census_summary(db_path, company_id: int) -> Optional[dict]:
+    conn = get_conn(db_path)
+    try:
+        row = conn.execute("SELECT * FROM census_summary WHERE company_id=?",
+                           (company_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def save_census_summary(db_path, company_id: int, data_json: str,
+                        user_id: int, now: str) -> None:
+    conn = get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO census_summary(company_id, data_json, updated_by, updated) "
+            "VALUES(?,?,?,?) ON CONFLICT(company_id) DO UPDATE SET "
+            "data_json=excluded.data_json, updated_by=excluded.updated_by, "
+            "updated=excluded.updated",
+            (company_id, data_json, user_id, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def add_qa_message(db_path, company_id: int, submission_id, author_id: int,
                    author_role: str, body: str, now: str, title: str = None,
                    parent_id: int = None, qno: int = None) -> int:
@@ -945,6 +970,28 @@ def delete_discount_curve(db_path, curve_id: int) -> None:
     try:
         conn.execute("DELETE FROM discount_curves WHERE id=?", (curve_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def discount_curve_in_use(db_path, curve_id: int) -> bool:
+    """이 할인율 커브가 한 번이라도 산출결과에 사용되었는지."""
+    conn = get_conn(db_path)
+    try:
+        r = conn.execute("SELECT 1 FROM results WHERE discount_curve_id=? LIMIT 1",
+                         (curve_id,)).fetchone()
+        return r is not None
+    finally:
+        conn.close()
+
+
+def base_rate_set_in_use(db_path, set_id: int) -> bool:
+    """이 기초율 세트가 한 번이라도 산출결과에 사용되었는지."""
+    conn = get_conn(db_path)
+    try:
+        r = conn.execute("SELECT 1 FROM results WHERE base_rate_set_id=? LIMIT 1",
+                         (set_id,)).fetchone()
+        return r is not None
     finally:
         conn.close()
 
