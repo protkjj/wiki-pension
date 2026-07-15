@@ -2674,6 +2674,32 @@ def _actuary_base_rates(user):
         _actuary_dev_rates(user)
 
 
+def _build_experience_xlsx(bands, rows, summary=None) -> bytes:
+    """산출된 경험율 엑셀 — ①밴드별 경험퇴직률 ②연령별 기초율표 행."""
+    import io as _io
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = "밴드별경험퇴직률"
+    if summary:
+        ws1.append([f"퇴직 {summary.get('n_withdrawals', 0)}건 · 노출 {summary.get('exposure', 0)}인년 "
+                    f"· 관측 {summary.get('obs_years', 0):.0f}년 "
+                    f"· 전체 경험퇴직률 {(summary.get('overall_withdrawal') or 0)*100:.2f}%"])
+    ws1.append(["밴드", "퇴직건수", "재직자수", "노출(인년)", "경험퇴직률(%)"])
+    for b in bands:
+        q = b.get("경험퇴직률")
+        ws1.append([b.get("밴드"), b.get("퇴직건수"), b.get("재직자수"), b.get("노출(인년)"),
+                    (round(q * 100, 4) if q is not None else None)])
+    ws2 = wb.create_sheet("연령별기초율표")
+    ws2.append(["연령", "경험퇴직률(%)", "사망률남(%)", "사망률여(%)", "승급률(%)"])
+    for r in rows:
+        def _pc(v):
+            return round(v * 100, 5) if isinstance(v, (int, float)) else None
+        ws2.append([r.get("age"), _pc(r.get("withdrawal")), _pc(r.get("mort_m")),
+                    _pc(r.get("mort_f")), _pc(r.get("raise_rate"))])
+    buf = _io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
 def _actuary_experience_rates(user, exp_stat):
     """경험 기초율 코너 — 기업이 올린 '퇴직자명부(직전 3~5년)'로 경험 퇴직률을 산출·저장."""
     st.markdown("#### 📈 경험 퇴직률 산출 (직전 3~5년 퇴직자명부 기반)")
@@ -2702,6 +2728,8 @@ def _actuary_experience_rates(user, exp_stat):
     if not fpath.exists():
         st.error("파일을 찾을 수 없습니다(서버에서 삭제됨).")
         return
+    st.download_button("⬇ 기초데이터(퇴직자명부) 다운로드", fpath.read_bytes(),
+                       file_name=fmap[fid]["filename"], key="exp_data_dl")
 
     try:
         retirees = EXP.parse_retiree_census(fpath.read_bytes())
@@ -2764,6 +2792,9 @@ def _actuary_experience_rates(user, exp_stat):
 
         cname = opt[cid]["company_name"]
         _yr = str(dt.date.today().year)
+        st.download_button("📥 산출된 경험율 엑셀 다운로드 (밴드별·연령별)",
+                           _build_experience_xlsx(res["bands"], rows, sm),
+                           file_name=f"경험퇴직률_{cname}_{_yr}.xlsx", key="exp_rate_dl")
         dname = st.text_input("세트 명칭", value=f"{cname} 경험퇴직률 {_yr}", key="exp_name")
         if st.button("💾 경험 기초율 세트 저장", type="primary", key="exp_save"):
             store.add_base_rate_set(
@@ -2785,6 +2816,19 @@ def _actuary_experience_rates(user, exp_stat):
             "ID": s["id"], "명칭": s["name"], "기준연도": s["base_year"], "정년": s["retirement_age"],
             "평균승급률(%)": round((s["avg_raise"] or 0) * 100, 2), "등록일": s["created"][:10],
         } for s in ex_sets]), width="stretch", hide_index=True)
+        _dlsel = st.selectbox("경험율 다운로드할 세트", [s["id"] for s in ex_sets],
+                              format_func=lambda i: next(f"[{i}] {s['name']}"
+                                                         for s in ex_sets if s["id"] == i),
+                              key="exp_dl_sel")
+        _dfull = store.get_base_rate_set(DB_PATH, _dlsel)
+        try:
+            _drows = json.loads(_dfull["data_json"]) if _dfull and _dfull.get("data_json") else []
+        except Exception:  # noqa: BLE001
+            _drows = []
+        if _drows:
+            st.download_button("📥 이 세트의 경험율 엑셀 다운로드",
+                               _build_experience_xlsx([], _drows),
+                               file_name=f"경험율_{_dfull['name']}.xlsx", key="exp_saved_dl")
         dsel = st.selectbox("경험세트 삭제", [0] + [s["id"] for s in ex_sets],
                             format_func=lambda i: "선택 안함" if i == 0 else f"[{i}]", key="exp_del_sel")
         _exp_used = bool(dsel) and store.base_rate_set_in_use(DB_PATH, dsel)
@@ -3126,8 +3170,8 @@ def _build_discount_basis_xlsx(sub, curve_id, disc_method, timing, salary, ret_a
     ws2.append(["연도", "예상지급액(현금흐름)", "커브 spot금리(%)", "할인기간(년)",
                 "커브 할인계수", "커브 현재가치"])
     for yr, cf in cflist:
-        sp = _D._spot(curve, yr) if curve else 0.0
         exn = _D._exponent(yr, timing)
+        sp = _D._spot_for_period(curve, exn) if curve else 0.0
         df = 1 / (1 + sp) ** exn if sp else 0.0
         ws2.append([yr, round(cf), round(sp * 100, 4), round(exn, 2),
                     round(df, 6), round(cf * df)])
@@ -3386,7 +3430,7 @@ def _actuary_work_detail(user, sid):
     # 적용 기초율 = (세트 + 300인 밴드)를 하나의 선택지로. 재직자수로 밴드 자동 세팅.
     _nrec = sub.get("n_records") or 0
     _auto_band = "ge300" if _nrec >= 300 else "lt300"
-    _br_opts = [{"key": "base:lt300", "label": "기본(CSV 표준 테이블)", "set_id": 0, "band": "lt300"}]
+    _br_opts = []
     for s in _brsets:
         if s.get("kind") == "experience":
             _br_opts.append({"key": f"{s['id']}:exp", "label": f"📈 {s['name']} · 경험률",
@@ -3405,6 +3449,13 @@ def _actuary_work_detail(user, sid):
         else:
             _br_opts.append({"key": f"{s['id']}:single", "label": s["name"],
                              "set_id": s["id"], "band": "lt300"})
+    # 개발원·경험 세트가 하나라도 있으면 그중에서 선택. 전혀 없을 때만 임시 샘플값 폴백.
+    if not _br_opts:
+        _br_opts = [{"key": "base:lt300", "label": "기본 샘플값(테스트용 · 정식 산출 아님)",
+                     "set_id": 0, "band": "lt300"}]
+        st.warning("⚠️ 등록된 **개발원 기초율·경험 기초율 세트가 없습니다.** 지금은 임시 샘플값으로만 "
+                   "계산됩니다(정식 산출 아님). 상단 **기초율 관리**에서 개발원 세트를 등록하거나, "
+                   "**경험 기초율**을 산출·저장한 뒤 선택하세요.")
     # 디폴트: 이 회사 경험세트가 있으면 그것(경험율 우선 선택), 없으면 최신 개발원세트 + 재직자수 밴드
     _keys = [o["key"] for o in _br_opts]
     _exp_first = next((s["id"] for s in _brsets if s.get("kind") == "experience"), None)
