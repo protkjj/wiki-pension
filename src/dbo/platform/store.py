@@ -904,7 +904,8 @@ def experience_upload_status(db_path) -> List[dict]:
     return sorted(out, key=lambda x: (x["n_sets"] > 0, x["company_name"]))
 
 
-EXPERIENCE_CENSUS_TYPE = "경험기초율산출데이터"
+# 경험퇴직률 산출용 명부 = 명부입력의 '퇴직자명부 300인이상' (직전 3~5년)
+EXPERIENCE_CENSUS_TYPE = "퇴직자명부 300인이상(직전 3년~5년) (자체경험율 사용기업만 작성)"
 
 
 def get_base_rate_set(db_path, set_id: int) -> Optional[dict]:

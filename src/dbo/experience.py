@@ -153,6 +153,140 @@ def _band_of(age: int, width: int = 5, lo: int = 15, hi: int = 60) -> int:
     return ((age - lo) // width) * width + lo
 
 
+# 퇴직자명부(직전 3~5년) 컬럼 별칭 — 경험퇴직률 산출용
+_RET_COLS = {
+    "emp_id": ["사원번호", "사번", "직원번호", "사원코드"],
+    "birth": ["생년월일", "생일", "출생일"],
+    "gender": ["성별", "gender", "sex"],
+    "hire": ["입사일자", "입사일", "hire"],
+    "leave": ["퇴직일_DC전환일", "퇴직일DC전환일", "퇴직일또는DC전환일", "퇴직일", "탈퇴일", "퇴직일자"],
+    "amount": ["퇴직금_DC전환금", "퇴직금DC전환금", "퇴직금또는DC전환금", "퇴직금", "DC전환금", "지급액"],
+    "emp_class": ["종업원구분", "종업원구분", "구분", "직군", "직종"],
+    "reason": ["사유", "reason"],
+}
+
+
+def parse_retiree_census(source: Union[str, Path, bytes]) -> List[Dict]:
+    """퇴직자명부 xlsx/csv 파싱 → [{emp_id,birth,gender,hire,leave,amount,emp_class,reason}].
+
+    헤더 자동 인식(괄호주석·줄바꿈 무시). 경험퇴직률 산출의 분자(퇴직 건수) 데이터.
+    """
+    from openpyxl import load_workbook
+
+    if isinstance(source, (bytes, bytearray)):
+        wb = load_workbook(io.BytesIO(source), data_only=True)
+    else:
+        wb = load_workbook(str(source), data_only=True)
+    sheet = next((s for s in wb.sheetnames if "요령" not in s), wb.sheetnames[0])
+    grid = list(wb[sheet].iter_rows(values_only=True))
+
+    alias = {f: [_norm_header(a) for a in al] for f, al in _RET_COLS.items()}
+    hdr_idx, colmap = None, {}
+    for ridx, row in enumerate(grid[:15]):
+        cm = {}
+        norm = {}
+        for cidx, cell in enumerate(row or []):
+            if cell is not None:
+                norm.setdefault(_norm_header(cell), cidx)
+        for field, na in alias.items():
+            for a in na:
+                if a in norm:
+                    cm[field] = norm[a]
+                    break
+        if "emp_id" in cm and "leave" in cm:
+            hdr_idx, colmap = ridx, cm
+            break
+    if hdr_idx is None:
+        return []
+
+    out = []
+    for row in grid[hdr_idx + 1:]:
+        if not row:
+            continue
+
+        def g(f):
+            j = colmap.get(f)
+            return row[j] if (j is not None and j < len(row)) else None
+
+        emp = _emp_id_to_str(g("emp_id"))
+        birth = _to_date(g("birth"))
+        leave = _to_date(g("leave"))
+        if emp is None and birth is None and leave is None:
+            continue
+        out.append({
+            "emp_id": emp, "birth": birth, "gender": _emp_id_to_str(g("gender")),
+            "hire": _to_date(g("hire")), "leave": leave,
+            "amount": _to_float(g("amount")),
+            "emp_class": _emp_id_to_str(g("emp_class")),
+            "reason": _emp_id_to_str(g("reason")),
+        })
+    return out
+
+
+def compute_withdrawal_rates(
+    retiree_records: List[Dict], active_ages: List[int], obs_years: float,
+    retirement_age: int = 60, band_width: int = 5,
+) -> Dict:
+    """직전 3~5년 퇴직자명부(분자) + 현재 재직자 연령분포(분모)로 경험 퇴직률 산출.
+
+    중심탈퇴율 근사: q_band = 퇴직건수(밴드) / [재직자수(밴드) × 관측연수].
+    사망률·승급률은 여기서 산출하지 않는다(사망률=개발원 차용, 승급률=임금인상율 입력).
+
+    반환: {'bands':[{밴드,퇴직건수,재직자수,노출(인년),경험퇴직률}], 'rows':[{age,withdrawal,...}],
+           'summary':{n_retirees,n_withdrawals,exposure,overall_withdrawal,obs_years,skipped}}
+    """
+    lo, hi = 15, int(retirement_age)
+    bands = list(range(lo, hi, band_width)) or [lo]
+    active_cnt = {b: 0 for b in bands}
+    wd = {b: 0 for b in bands}
+
+    for a in active_ages:
+        if a is None:
+            continue
+        active_cnt[_band_of(int(a), band_width, lo, hi)] += 1
+
+    skipped = 0
+    for r in retiree_records:
+        birth, leave = r.get("birth"), r.get("leave")
+        if birth is None or leave is None:
+            skipped += 1
+            continue
+        age_leave = int((leave.toordinal() - birth.toordinal()) // 365.25)
+        wd[_band_of(age_leave, band_width, lo, hi)] += 1
+
+    oy = float(obs_years) if obs_years and obs_years > 0 else 1.0
+    q_by_band = {}
+    band_rows = []
+    tot_wd = 0
+    tot_exp = 0.0
+    for b in bands:
+        expo = active_cnt[b] * oy
+        q = (wd[b] / expo) if expo > 0 else None
+        q_by_band[b] = q
+        tot_wd += wd[b]
+        tot_exp += expo
+        top = min(b + band_width - 1, hi)
+        band_rows.append({
+            "밴드": f"{b}-{top}", "퇴직건수": wd[b], "재직자수": active_cnt[b],
+            "노출(인년)": round(expo, 1),
+            "경험퇴직률": (round(q, 5) if q is not None else None),
+        })
+
+    rows = []
+    for age in range(lo, hi + 1):
+        q = q_by_band.get(_band_of(age, band_width, lo, hi))
+        rows.append({"age": age, "withdrawal": (round(q, 6) if q is not None else None),
+                     "raise_rate": None, "mort_m": None, "mort_f": None})
+
+    summary = {
+        "n_retirees": len(retiree_records), "n_withdrawals": tot_wd,
+        "exposure": round(tot_exp, 1),
+        "overall_withdrawal": (tot_wd / tot_exp) if tot_exp > 0 else None,
+        "obs_years": oy, "skipped": skipped,
+    }
+    return {"bands": band_rows, "rows": rows, "summary": summary}
+
+
 def compute_experience_rates(
     records: List[Dict], obs_start: Optional[date], obs_end: Optional[date],
     retirement_age: int = 60, band_width: int = 5, min_salary_years: float = 0.5,

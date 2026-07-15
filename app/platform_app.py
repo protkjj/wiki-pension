@@ -1059,7 +1059,7 @@ def _client_edit_screen(user, sid):
         _client_plan_info_form(user)
     with st.expander("② 📋 명부 수정 (재업로드하면 이 건이 갱신)", expanded=True):
         _client_census_form(user, val_date, sub["purpose"] or PURPOSES[0], edit_sid=sid)
-    with st.expander("③ 📊 기초율 (할인율·임금인상율·경험기초율·사외적립율)", expanded=False):
+    with st.expander("③ 📊 기초율 (할인율·임금인상율·사외적립율)", expanded=False):
         _client_basis_rates(user)
     with st.expander("④ 🎖 기타장기", expanded=False):
         _client_other_lt(user)
@@ -1380,7 +1380,7 @@ def _client_apply(user):
         _client_plan_info_form(user)
     with st.expander("② 📋 명부입력", expanded=True):
         _client_census_form(user, val_date, purpose)
-    with st.expander("③ 📊 기초율 (할인율·임금인상율·경험기초율·사외적립율)", expanded=False):
+    with st.expander("③ 📊 기초율 (할인율·임금인상율·사외적립율)", expanded=False):
         _client_basis_rates(user)
     with st.expander("④ 🎖 기타장기 (장기근속 포상 등 기타장기종업원급여)", expanded=False):
         _client_other_lt(user)
@@ -1560,12 +1560,12 @@ def _client_basis_rates(user):
                                  user["id"], now())
             st.success("할인율·임금인상율을 저장했습니다.")
 
-    st.divider()
-    st.markdown("**c. 경험기초율 산출데이터**  ·  300인 이상 기업 중 자체 경험율 사용 기업만 해당")
-    _client_experience_data(user)
+    st.info("ℹ️ **경험퇴직률**은 별도 코너가 아니라 **② 명부입력**의 "
+            "‘퇴직자명부 300인이상(직전 3년~5년)’ 을 올리면 계리사가 그 명부로 산출합니다. "
+            "(자체 경험율 사용 기업만 작성)")
 
     st.divider()
-    st.markdown("**d. 사외적립율(적립비율·가입비율)**")
+    st.markdown("**c. 사외적립율(적립비율·가입비율)**")
     with st.form("basis_funding"):
         _cur_ratio = pi.get("funding_ratio")
         _cur_label = None
@@ -2675,16 +2675,16 @@ def _actuary_base_rates(user):
 
 
 def _actuary_experience_rates(user, exp_stat):
-    """경험 기초율 코너 — 기업이 올린 경험데이터로 경험 퇴직률·승급률을 산출·저장."""
-    st.markdown("#### 📈 경험 기초율 산출 (회사 경험 퇴직률·승급률)")
-    st.caption("기업이 올린 '경험기초율 산출데이터'로 연령대별 경험 퇴직률·승급률을 산출합니다. "
-               "사망률은 개발원 세트에서 차용합니다. 산출한 세트는 해당 기업 전용으로 저장됩니다.")
+    """경험 기초율 코너 — 기업이 올린 '퇴직자명부(직전 3~5년)'로 경험 퇴직률을 산출·저장."""
+    st.markdown("#### 📈 경험 퇴직률 산출 (직전 3~5년 퇴직자명부 기반)")
+    st.caption("기업이 **명부입력**에서 올린 '퇴직자명부 300인이상(직전 3~5년)'의 퇴직건수를 분자로, "
+               "현재 **재직자명부**의 연령분포×관측연수를 분모(노출)로 하여 연령대별 **경험 퇴직률**을 "
+               "산출합니다. (중심탈퇴율 근사) 사망률은 개발원 세트에서 차용, 승급률은 임금인상율 입력을 사용합니다.")
     if not exp_stat:
-        st.info("아직 경험기초율 산출데이터를 올린 기업이 없습니다. "
-                "기업이 '경험기초율 산출데이터'를 업로드하면 여기에 표시됩니다.")
+        st.info("아직 퇴직자명부를 올린 기업이 없습니다. 기업이 명부입력에서 "
+                "'퇴직자명부 300인이상(직전 3~5년)'을 업로드하면 여기에 표시됩니다.")
         return
 
-    # 회사 선택 (미산출 회사를 앞에 🔔로 표시)
     def _lbl(x):
         flag = "🔔 " if x["n_sets"] == 0 else "✅ "
         return f"{flag}{x['company_name']} (업로드 {x['n_uploads']} · 세트 {x['n_sets']})"
@@ -2692,10 +2692,10 @@ def _actuary_experience_rates(user, exp_stat):
     cid = st.selectbox("기업 선택", list(opt), format_func=lambda i: _lbl(opt[i]), key="exp_co")
     files = store.list_aux_census(DB_PATH, cid, store.EXPERIENCE_CENSUS_TYPE)
     if not files:
-        st.info("이 기업의 경험데이터 파일이 없습니다.")
+        st.info("이 기업의 퇴직자명부 파일이 없습니다.")
         return
     fmap = {f["id"]: f for f in files}
-    fid = st.selectbox("데이터 파일", list(fmap),
+    fid = st.selectbox("퇴직자명부 파일", list(fmap),
                        format_func=lambda i: f"{fmap[i]['filename']} ({fmap[i]['created'][:16]})",
                        key="exp_file")
     fpath = Path(fmap[fid]["stored_path"])
@@ -2704,46 +2704,51 @@ def _actuary_experience_rates(user, exp_stat):
         return
 
     try:
-        parsed = EXP.parse_experience_data(fpath.read_bytes())
+        retirees = EXP.parse_retiree_census(fpath.read_bytes())
     except Exception as e:  # noqa: BLE001
-        st.error(f"경험데이터를 읽지 못했습니다: {e}")
+        st.error(f"퇴직자명부를 읽지 못했습니다: {e}")
         return
 
-    c1, c2, c3 = st.columns(3)
-    _os = parsed.get("obs_start")
-    _oe = parsed.get("obs_end")
-    obs_start = c1.date_input("관측 시작일", value=(_os or dt.date(dt.date.today().year - 3, 1, 1)),
-                              key="exp_os")
-    obs_end = c2.date_input("관측 종료일", value=(_oe or dt.date(dt.date.today().year - 1, 12, 31)),
-                            key="exp_oe")
-    ret_age = c3.number_input("정년", min_value=50, max_value=75, value=60, step=1, key="exp_ret")
-    st.caption(f"인식된 종업원 {parsed['n']}명"
-               + (f" · 파일 관측기간 {_os}~{_oe}" if _os and _oe else " · 관측기간은 위에서 지정"))
+    # 분모 노출: 현재 재직자명부의 연령분포
+    active = _latest_active_census_records(cid)
+    if not active:
+        st.warning("⚠️ 이 기업의 **재직자명부**가 없어 노출(분모)을 만들 수 없습니다. "
+                   "재직자명부가 등록된 뒤 산출하세요.")
+        return
+    _ref = dt.date.today()
+    active_ages = [int((_ref.toordinal() - r.birth_date.toordinal()) // 365.25)
+                   for r in active if getattr(r, "birth_date", None)]
 
-    # 사망률 차용 개발원 세트
+    c1, c2 = st.columns(2)
+    obs_years = c1.number_input("관측연수(직전 몇 년 퇴직자인가)", min_value=1.0, max_value=10.0,
+                                value=3.0, step=1.0, key="exp_oy",
+                                help="퇴직자명부가 담고 있는 기간(직전 3~5년). 분모 노출 = 재직자수 × 관측연수.")
+    ret_age = c2.number_input("정년", min_value=50, max_value=75, value=60, step=1, key="exp_ret")
+    st.caption(f"퇴직자명부 {len(retirees)}건 · 재직자(노출 분모) {len(active_ages)}명 · 관측 {obs_years:.0f}년")
+
     dev_sets = store.list_base_rate_sets(DB_PATH, kind="dev")
     _mopt = {0: "사망률 미적용(0)"}
     _mopt.update({s["id"]: f"[{s['id']}] {s['name']}" for s in dev_sets})
     mort_from = st.selectbox("사망률 차용(개발원 세트)", list(_mopt), format_func=lambda i: _mopt[i],
-                             key="exp_mort", help="경험데이터로는 사망률을 추정하기 어려워 개발원 세트에서 가져옵니다.")
+                             key="exp_mort", help="퇴직자명부로는 사망률을 추정하기 어려워 개발원 세트에서 가져옵니다.")
 
-    if st.button("🧮 경험률 산출", type="primary", key="exp_run"):
-        res = EXP.compute_experience_rates(parsed["records"], obs_start, obs_end, int(ret_age))
+    if st.button("🧮 경험 퇴직률 산출", type="primary", key="exp_run"):
+        res = EXP.compute_withdrawal_rates(retirees, active_ages, float(obs_years), int(ret_age))
         st.session_state["exp_result"] = {"res": res, "cid": cid, "mort_from": mort_from,
-                                          "ret": int(ret_age), "obs": f"{obs_start}~{obs_end}"}
+                                          "ret": int(ret_age), "oy": float(obs_years)}
 
     er = st.session_state.get("exp_result")
     if er and er.get("cid") == cid:
         res = er["res"]
         sm = res["summary"]
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("표본(명)", sm["n"])
+        k1.metric("퇴직자(건)", sm["n_withdrawals"])
         k2.metric("총 노출(인년)", f"{sm['exposure']:.1f}")
         k3.metric("경험 퇴직률(전체)", f"{(sm['overall_withdrawal'] or 0)*100:.2f}%")
-        k4.metric("경험 승급률(평균)", f"{(sm['avg_raise'] or 0)*100:.2f}%")
+        k4.metric("관측연수", f"{sm['obs_years']:.0f}년")
         if sm["skipped"]:
-            st.caption(f"생년월일·이력 부족 등으로 {sm['skipped']}건 제외.")
-        st.markdown("**연령대(밴드)별 경험률**")
+            st.caption(f"생년월일·퇴직일 부족 등으로 {sm['skipped']}건 제외.")
+        st.markdown("**연령대(밴드)별 경험 퇴직률**")
         st.dataframe(pd.DataFrame(res["bands"]), width="stretch", hide_index=True)
 
         rows = [dict(r) for r in res["rows"]]
@@ -2758,16 +2763,17 @@ def _actuary_experience_rates(user, exp_stat):
             st.dataframe(_rates_display_df(rows), width="stretch", hide_index=True, height=280)
 
         cname = opt[cid]["company_name"]
-        dname = st.text_input("세트 명칭", value=f"{cname} 경험 {er['obs'][:4]}", key="exp_name")
+        _yr = str(dt.date.today().year)
+        dname = st.text_input("세트 명칭", value=f"{cname} 경험퇴직률 {_yr}", key="exp_name")
         if st.button("💾 경험 기초율 세트 저장", type="primary", key="exp_save"):
             store.add_base_rate_set(
-                DB_PATH, dname.strip() or f"{cname} 경험", "경험률", er["obs"][:4], "당기",
-                er["ret"], sm.get("avg_raise"),
+                DB_PATH, dname.strip() or f"{cname} 경험퇴직률", "경험률", _yr, "당기",
+                er["ret"], None,
                 json.dumps(rows, ensure_ascii=False),
-                f"경험데이터 산출 · 관측 {er['obs']} · 표본 {sm['n']}명 · 노출 {sm['exposure']}인년",
+                f"퇴직자명부 산출 · 퇴직 {sm['n_withdrawals']}건 · 노출 {sm['exposure']}인년 · 관측 {er['oy']:.0f}년",
                 user["id"], now(), company_id=cid, kind="experience")
             st.session_state.pop("exp_result", None)
-            st.success(f"✅ '{dname}' 경험 기초율 세트를 저장했습니다. 산출 설계에서 선택할 수 있습니다.")
+            st.success(f"✅ '{dname}' 경험 기초율 세트를 저장했습니다. 부채 산출에서 선택할 수 있습니다.")
             st.rerun()
 
     # 이 회사의 기존 경험세트
@@ -3191,7 +3197,7 @@ def _actuary_work_detail(user, sid):
         _plan_readonly(_cid)
     with st.expander("② 📁 명부조회 (산출 기본정보·오류·재업로드)", expanded=False):
         _actuary_census_view(user, sub, sid)
-    with st.expander("③ 📊 기업 제공 기초율 (할인율·임금인상율·경험기초율·사외적립율)", expanded=False):
+    with st.expander("③ 📊 기업 제공 기초율 (할인율·임금인상율·사외적립율)", expanded=False):
         _actuary_basis_readonly(_cid)
     with st.expander("④ 🎖 기타장기", expanded=False):
         _client_other_lt(user, company_id=_cid, kp="act_")
