@@ -72,6 +72,24 @@ def _idx(options, value) -> int:
     return options.index(value) if value in options else 0
 
 
+def _pct_text_input(col, label, default_pct: float, key: str, help: str = None) -> float:
+    """퍼센트(%) 입력 — number_input의 소수점 인식 문제(5.21→521)를 피해 텍스트로 받아 파싱.
+
+    반환: 퍼센트 실수값(예: 5.21). 잘못 입력하면 경고 후 기본값 사용.
+    """
+    def _fmt(v):
+        return f"{v:g}"
+    raw = col.text_input(label, value=_fmt(default_pct), key=key, help=help)
+    s = str(raw).replace(",", "").replace("%", "").strip()
+    if s in ("", "-", "."):
+        return float(default_pct)
+    try:
+        return float(s)
+    except ValueError:
+        col.caption("⚠️ 숫자로 입력하세요 (예: 5.21)")
+        return float(default_pct)
+
+
 def render_qa_thread(company_id: int, author_role: str, author_id: int):
     """질의응답 게시판 — 질문번호(Q#)+제목, 답변은 질문 아래 중첩."""
     threads = store.list_qa_threads(DB_PATH, company_id)
@@ -1130,7 +1148,7 @@ def _report_file_for(sub):
     return None
 
 
-_LIST_WIDTHS = [0.85, 0.55, 1.4, 1.2, 1.0, 1.4, 2.0, 1.4]
+_LIST_WIDTHS = [0.85, 1.0, 1.4, 1.2, 1.0, 1.4, 2.0, 1.4]
 _LIST_HEADERS = ["신청번호", "선택", "기업명", "산출기준일", "신청일", "산출목적", "진행상태", "다운로드"]
 _APPLY_NO_BASE = 1010   # 신청번호 = base + submission.id (1번 → 1011)
 
@@ -1159,13 +1177,15 @@ def _render_submission_list(user, subs, role, pending=None, show_edit=True):
     for s in subs:
         is_sel = (s["id"] == sel)
         cols = st.columns(_LIST_WIDTHS, vertical_alignment="center")
-        cols[0].markdown(f"**{_apply_no(s)}**")
-        if cols[1].button("🔘" if is_sel else "⚪", key=f"{role}_sel_{s['id']}", help="선택"):
+        cols[0].markdown(f"**▶ {_apply_no(s)}**" if is_sel else f"{_apply_no(s)}")
+        if cols[1].button("✅ 선택됨" if is_sel else "선택", key=f"{role}_sel_{s['id']}",
+                          type="primary" if is_sel else "secondary", width="stretch",
+                          help="이 기업을 선택(작업화면이 이 기업으로 열립니다)"):
             st.session_state[sel_key] = None if is_sel else s["id"]
             st.session_state.pop(detail_key, None)
             st.rerun()
         nm = (s["company_name"] or "-")[:6]
-        cols[2].markdown(f"**{nm}**" if is_sel else nm)
+        cols[2].markdown(f"**🔵 {nm}**" if is_sel else nm)
         cols[3].write(s["valuation_date"])
         cols[4].write((s["created"] or "")[:10])
         cols[5].caption(s["purpose"] or "IFRS-1019")
@@ -1903,6 +1923,31 @@ def _base_set_snapshot(set_id: int, size_band: str) -> dict:
     }
 
 
+def _client_saved_roster_panel(user):
+    """명부입력에서 업로더가 비어 있을 때, 이미 저장된 재직자명부(신청 건)를 보여준다.
+
+    업로드 직후 미리보기만 보이고 나중에 다시 오면 아무것도 안 보여 '저장 안 됨'으로
+    오해하던 문제 대응 — 저장된 명부의 상태·건수·다운로드를 항상 확인할 수 있게 한다.
+    """
+    subs = store.list_submissions(DB_PATH, company_id=user["company_id"])
+    if not subs:
+        st.info("ℹ️ 아직 저장된 재직자명부가 없습니다. 위에서 명부 파일을 업로드하세요.")
+        return
+    st.success(f"✅ 저장된 재직자명부 {len(subs)}건 — 아래에서 확인·다운로드할 수 있습니다.")
+    for s in subs[:8]:
+        c = st.columns([3, 1.4, 1])
+        c[0].markdown(f"**[{_apply_no(s)}]** 산출기준일 {s['valuation_date']} · "
+                      f"{s['n_records']}명 · 오류 {s['n_errors']} · {_submission_progress(s)}")
+        c[1].caption((s['created'] or '')[:16])
+        mp = Path(s["stored_path"])
+        if mp.exists():
+            c[2].download_button("📄 명부", mp.read_bytes(), file_name=mp.name,
+                                 key=f"savedmen_{s['id']}", width="stretch")
+        else:
+            c[2].caption("파일없음")
+    st.caption("※ 진행상태·수정/삭제는 상단 **1. 현황조회**에서 관리합니다.")
+
+
 def _client_census_form(user, val_date, purpose, edit_sid=None):
     st.warning("⚠️ 실명·주민번호·주소 등 개인정보 금지 — 명부 등록 시 불필요한 개인정보는 "
                "**자동 삭제**되어 등록되며, 모든 자료는 **DB 암호화**되어 저장됩니다.")
@@ -1919,7 +1964,10 @@ def _client_census_form(user, val_date, purpose, edit_sid=None):
     up = st.file_uploader(f"{ctype} 파일 업로드 (xlsx / csv)", type=["xlsx", "csv"],
                           key=f"up_{meta['code']}")
     if up is None:
-        _aux_list_ui(user, ctype) if ctype != "재직자명부" else None
+        if ctype != "재직자명부":
+            _aux_list_ui(user, ctype)
+        else:
+            _client_saved_roster_panel(user)   # 저장된 재직자명부 확인(업로더가 비어도 보이게)
         return
     raw = bytes(up.getbuffer())
     # 업로드 서명(파일명·크기·기준일) — 리런 때 같은 파일이면 재저장·중복생성하지 않음(이중접수 방지)
@@ -1987,7 +2035,9 @@ def _client_census_form(user, val_date, purpose, edit_sid=None):
         prev["sid"], prev["dupe"] = edit_sid, None
         st.success("명부를 교체했습니다(이 건 갱신).")
     elif new_upload:
-        # 산출기준일은 기업당 하나만 — 같은 기준일 건이 있으면 접수여부에 따라 처리
+        # 산출기준일은 기업당 하나만 — 같은 기준일 신청건이 있으면 '제자리 갱신'한다.
+        # (삭제 후 새로 만들면 신청(submitted)·식별자가 사라져 계리사 목록에서 빠지고,
+        #  화면상 명부가 리셋되어 '삭제된 것처럼' 보이므로 절대 삭제·재생성하지 않는다.)
         same = [s for s in store.list_submissions(DB_PATH, company_id=user["company_id"])
                 if s["valuation_date"] == val_date.isoformat()]
         blocked = [s for s in same if s["status"] not in store.CLIENT_EDITABLE]
@@ -1995,9 +2045,18 @@ def _client_census_form(user, val_date, purpose, edit_sid=None):
         if blocked:
             prev["dupe"], prev["sid"] = "blocked", None
         elif editable:
-            prev["dupe"] = "replace"
-            prev["replace_ids"] = [s["id"] for s in editable]
-            prev["sid"] = None
+            target = editable[0]                       # 최근 편집가능 건을 파일만 교체
+            was_submitted = target["status"] == "submitted"
+            store.update_submission_file(DB_PATH, target["id"], up.name, str(saved),
+                                         report.n_records, len(report.errors),
+                                         len(report.warnings), now())
+            # 이미 '신청됨'이면 상태 유지(계리사가 계속 조회) — 아니면 새 검증결과 반영
+            if not was_submitted and target["status"] != status:
+                store.update_submission_status(DB_PATH, target["id"], status, now())
+            store.log_action(DB_PATH, user["id"], "reupload", now(),
+                             f"submission#{target['id']} {'submitted' if was_submitted else status}")
+            prev["sid"], prev["dupe"] = target["id"], None
+            prev["kept_submitted"] = was_submitted
         else:
             prev["sid"], prev["dupe"] = _create_now(), None
 
@@ -2005,25 +2064,11 @@ def _client_census_form(user, val_date, purpose, edit_sid=None):
     if prev.get("dupe") == "blocked":
         st.error(f"⛔ 산출기준일 **{val_date}** 건이 이미 **접수완료(또는 그 이후)** 상태입니다. "
                  "새로 올릴 수 없습니다. 수정이 필요하면 계리사에게 문의하세요.")
-    elif prev.get("dupe") == "replace":
-        st.warning(f"⚠️ 같은 산출기준일(**{val_date}**) 신청건이 이미 있습니다. "
-                   "산출기준일은 기업당 하나만 등록됩니다.")
-        rc1, rc2 = st.columns([2, 4])
-        if rc1.button("🗑 기존 삭제하고 새로 등록", type="primary", key=f"repl_{meta['code']}"):
-            for oid in prev.get("replace_ids", []):
-                old = store.get_submission(DB_PATH, oid)
-                if old:
-                    try:
-                        Path(old["stored_path"]).unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    store.delete_submission(DB_PATH, oid)
-            prev["sid"], prev["dupe"] = _create_now(), None
-            st.success("기존 건을 삭제하고 새로 등록했습니다.")
-            st.rerun()
-        rc2.caption("기존 신청건을 삭제하고 이 명부로 새로 등록합니다. (접수 전 건만 가능)")
+    elif prev.get("kept_submitted"):
+        st.success(f"✅ 같은 산출기준일(**{val_date}**) 신청건의 명부를 교체했습니다. "
+                   "이미 신청된 건이라 상태는 그대로 유지되며, 계리사가 갱신된 명부로 확인합니다.")
 
-    if prev.get("sid"):
+    if prev.get("sid") and not prev.get("kept_submitted"):
         if report.has_errors:
             st.warning("⚠️ 오류가 있습니다. 아래에서 **오류만 조회·다운로드**해 수정 후 다시 올리거나, "
                        "**신청하기**로 이대로 신청할 수 있습니다.")
@@ -2617,10 +2662,20 @@ def _actuary_company_lookup(user, pending=None):
     _render_submission_list(user, rows, "actuary", pending, show_edit=False)
     # 계리사는 선택된 건(없으면 첫 건)의 작업화면을 항상 표시 — 제도조회·명부·부채계산 등
     sel = st.session_state.get("actuary_sel_sid")
-    if sel not in [s["id"] for s in rows]:
+    _auto = sel not in [s["id"] for s in rows]
+    if _auto:
+        # 기본 열람은 목록 첫 건으로 하되 세션상태는 건드리지 않는다.
+        # (되쓰면 '선택취소'가 즉시 덮어써져 다시 선택이 안 되는 문제가 생김)
         sel = rows[0]["id"]
+    _ssub = next(s for s in rows if s["id"] == sel)
     st.divider()
-    st.caption("↑ 목록에서 **선택(⚪)** 하면 아래 작업화면이 그 기업으로 바뀝니다.")
+    st.markdown(
+        f"<div style='background:#1F4E79;color:#fff;padding:8px 14px;border-radius:8px;"
+        f"font-size:1.05rem;font-weight:700'>📂 현재 작업 중: {_ssub['company_name']} · "
+        f"산출기준일 {_ssub['valuation_date']} · {_submission_progress(_ssub)}</div>",
+        unsafe_allow_html=True)
+    st.caption("↑ 목록의 **선택** 버튼(선택되면 파란 **✅ 선택됨**)으로 다른 기업으로 바꿀 수 있습니다."
+               + ("  (지금은 목록 첫 기업이 자동 선택됨)" if _auto else ""))
     _actuary_work_detail(user, sel)
 
 
@@ -2700,12 +2755,65 @@ def _build_experience_xlsx(bands, rows, summary=None) -> bytes:
     buf = _io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
+def _actuary_withdrawal_curve(user):
+    """연령별 퇴직률 곡선(엑셀 결과값)을 그대로 경험 기초율 세트로 반영.
+
+    산출과정 없이 회사가 확정한 '연령별 당기 퇴직률'을 결과값만 반영할 때 사용.
+    (분자/분모 재산출과 무관 — 회사 엑셀 값을 시스템 산출에 1:1로 쓰게 한다.)
+    """
+    with st.expander("📈 연령별 퇴직률 곡선 직접 반영 (엑셀 결과값 그대로)", expanded=False):
+        st.caption("회사가 엑셀로 확정한 **연령별 당기 퇴직률**을 산출과정 없이 결과값 그대로 반영합니다. "
+                   "업로드하면 그 값이 경험 기초율 세트로 저장되어 **부채산출에서 이 퇴직률로 계산**됩니다.")
+        comps = store.list_companies(DB_PATH)
+        if not comps:
+            st.info("등록된 기업이 없습니다.")
+            return
+        cmap = {c["id"]: c["name"] for c in comps}
+        cid = st.selectbox("기업 선택", list(cmap), format_func=lambda i: cmap[i], key="wc_co")
+        st.download_button("📄 연령별 퇴직률 곡선 양식 다운로드", EXP.build_withdrawal_curve_template(),
+                           file_name="연령별_퇴직률곡선_양식.xlsx", key="wc_tmpl")
+        up = st.file_uploader("연령별 퇴직률 곡선 업로드 (xlsx / csv) — 2열: 연령·퇴직률",
+                              type=["xlsx", "csv"], key="wc_up")
+        if up is None:
+            return
+        try:
+            rows = EXP.parse_withdrawal_curve(bytes(up.getbuffer()))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"곡선을 읽지 못했습니다: {e}")
+            return
+        if not rows:
+            st.warning("연령·퇴직률 값을 찾지 못했습니다. 양식을 확인하세요.")
+            return
+
+        cdf = pd.DataFrame([{"연령": r["age"], "퇴직률": r["withdrawal"]} for r in rows])
+        c1, c2 = st.columns([2, 3])
+        c1.caption(f"인식 {len(rows)}행 · 연령 {rows[0]['age']}~{rows[-1]['age']} · "
+                   f"평균 {cdf['퇴직률'].mean():.4f} · 최대 {cdf['퇴직률'].max():.4f}")
+        c1.dataframe(cdf, width="stretch", hide_index=True, height=240)
+        c2.line_chart(cdf.set_index("연령"))
+
+        _yr = str(dt.date.today().year)
+        ret = st.number_input("정년(참고)", min_value=50, max_value=75, value=60, step=1, key="wc_ret")
+        dname = st.text_input("세트 명칭", value=f"{cmap[cid]} 연령별 퇴직률 {_yr}", key="wc_name")
+        if st.button("💾 경험 기초율 세트로 저장", type="primary", key="wc_save"):
+            store.add_base_rate_set(
+                DB_PATH, dname.strip() or f"{cmap[cid]} 연령별 퇴직률", "엑셀 곡선", _yr, "당기",
+                int(ret), None, json.dumps(rows, ensure_ascii=False),
+                f"연령별 퇴직률 곡선 직접 반영 · {len(rows)}개 연령 · 업로드 {up.name}",
+                user["id"], now(), company_id=cid, kind="experience")
+            st.success(f"✅ '{dname}' 세트를 저장했습니다. 부채산출에서 이 퇴직률로 계산됩니다.")
+            st.rerun()
+
+
 def _actuary_experience_rates(user, exp_stat):
     """경험 기초율 코너 — 기업이 올린 '퇴직자명부(직전 3~5년)'로 경험 퇴직률을 산출·저장."""
     st.markdown("#### 📈 경험 퇴직률 산출 (직전 3~5년 퇴직자명부 기반)")
     st.caption("기업이 **명부입력**에서 올린 '퇴직자명부 300인이상(직전 3~5년)'의 퇴직건수를 분자로, "
                "현재 **재직자명부**의 연령분포×관측연수를 분모(노출)로 하여 연령대별 **경험 퇴직률**을 "
                "산출합니다. (중심탈퇴율 근사) 사망률은 개발원 세트에서 차용, 승급률은 임금인상율 입력을 사용합니다.")
+
+    _actuary_withdrawal_curve(user)     # 연령별 퇴직률 곡선 직접 반영(엑셀 결과값)
+
     if not exp_stat:
         st.info("아직 퇴직자명부를 올린 기업이 없습니다. 기업이 명부입력에서 "
                 "'퇴직자명부 300인이상(직전 3~5년)'을 업로드하면 여기에 표시됩니다.")
@@ -3204,7 +3312,7 @@ def _build_discount_basis_xlsx(sub, curve_id, disc_method, timing, salary, ret_a
         ws2.append(["듀레이션(년)", round(solved["duration"], 3)])
         ws2.append(["듀레이션 할인율(%)", round(solved["duration_rate"] * 100, 4)])
         ws2.append(["커브 부채 PV", round(solved["curve_pv"])])
-        _applied = solved["duration_rate"] if disc_method == "듀레이션 적용" else solved["single_rate"]
+        _applied = solved["duration_rate"] if disc_method.startswith("듀레이션") else solved["single_rate"]
         ws2.append(["→ 적용 할인율(%)", round(_applied * 100, 4)])
     buf = _io.BytesIO()
     wb.save(buf)
@@ -3300,14 +3408,21 @@ def _actuary_work_detail(user, sid):
                "아래에서 계리사가 변경할 수 있습니다.")
     _prior_rec = store.get_prior_record(DB_PATH, _cid) or {}
     _prior_sal_default = float(_prior_rec.get("prior_salary_rate") or 0.0)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     val_date = c1.date_input("산출기준일", dt.date.fromisoformat(sub["valuation_date"]))
-    salary = c2.number_input("1. 적용 임금상승율 (%)", value=float(_sal_default), step=0.1,
-                             help="기업 제공 임금인상율(제안 또는 과거5년 평균)이 기본값. 계리사가 변경 가능.") / 100
-    prior_salary = c3.number_input("전기 임금상승율 (%)", value=_prior_sal_default, step=0.1,
-                                   key=f"priorsal_{sid}",
-                                   help="전기 평가 시 적용했던 임금상승율. 전기가정 PBO(가정변경 효과) 비교에 사용됩니다.") / 100
-    ret_age = c4.number_input("정년", value=_ret_default, step=1)
+    # % 입력은 number_input의 소수점 인식 문제(5.21→521 등)를 피해 텍스트로 받아 파싱한다.
+    _base_up = _pct_text_input(c2, "1. Base-up (%)", float(_sal_default), f"baseup_{sid}",
+                               "기업 제공 임금인상율(Base-up · 호봉승급 제외). 예: 3 또는 3.0")
+    _promo = _pct_text_input(c3, "+ 승급률(호봉, %)", 0.0, f"promo_{sid}",
+                             "호봉승급 등 경험승급률(Base-up에 더해 적용 임금상승율이 됩니다). 예: 2.21  "
+                             "경험승급률은 '관측시작·종료급여'로 최소자승 산출하는 것이 정확합니다.")
+    # 엔진은 단일 임금상승률(g)을 적용 → g = Base-up + 승급률
+    salary = (_base_up + _promo) / 100
+    prior_salary = _pct_text_input(c4, "전기 임금상승율 (%)", _prior_sal_default, f"priorsal_{sid}",
+                                   "전기 평가 시 적용했던 임금상승율. 전기가정 PBO(가정변경 효과) 비교에 사용됩니다.") / 100
+    ret_age = c5.number_input("정년", value=_ret_default, step=1)
+    st.caption(f"→ **적용 임금상승율(Base-up + 승급) = {(_base_up + _promo):.4f}%** "
+               f"(Base-up {_base_up:.4f}% + 승급 {_promo:.4f}%). 엔진은 이 합계를 임금상승률로 적용합니다.")
     _tcur = _plan_timing(sub["company_id"])
     timing_lbl = st.radio("탈퇴·지급 시점 (할인 기준)", TIMING_OPTS,
                           index=(1 if _tcur == "end_of_year" else 0), horizontal=True,
@@ -3318,10 +3433,14 @@ def _actuary_work_detail(user, sid):
     # 2. 적용 할인율 — 산출방법(단일율/듀레이션) + 당기/전기 커브
     st.markdown("**2. 적용 할인율**")
     _curves = store.list_discount_curves(DB_PATH)     # 당기/전기 구분 없이 전체(기준일·등급)
-    disc_method = st.radio("적용 할인율 산출 방법", ["단일율", "듀레이션 적용"], horizontal=True,
+    disc_method = st.radio("적용 할인율 산출 방법",
+                           ["단일율 (K-IFRS 표준·권장)", "듀레이션 적용 (근사)"], horizontal=True,
                            key=f"discm_{sid}",
-                           help="단일율: 커브PV = 단일율PV 가 되는 flat rate. "
-                                "/ 듀레이션 적용: 듀레이션 시점의 커브 금리.")
+                           help="단일율: 커브PV = 단일율PV 가 되는 flat rate(수익률곡선접근법·계리보고서 표준). "
+                                "/ 듀레이션 적용: 듀레이션 시점의 커브 spot 금리(근사값 — 표준보다 낮게 나옴).")
+    st.caption("ℹ️ **단일율**이 K-IFRS 수익률곡선접근법 표준이며 계리사 엑셀 산출과 정합됩니다. "
+               "'듀레이션 적용'은 듀레이션 지점의 커브금리를 그대로 쓰는 근사로, 우상향 커브에서는 "
+               "단일율보다 **낮게** 나와 부채가 커집니다.")
 
     def _curve_pts(cid):
         crow = store.get_discount_curve(DB_PATH, cid) if cid else None
@@ -3379,7 +3498,7 @@ def _actuary_work_detail(user, sid):
                       width="stretch", hide_index=True, height=180)
         sol = _solve_pts(pts)
         if sol:
-            applied = sol["duration_rate"] if disc_method == "듀레이션 적용" else sol["single_rate"]
+            applied = sol["duration_rate"] if disc_method.startswith("듀레이션") else sol["single_rate"]
             cc2.metric(f"{label} 단일할인율", f"{sol['single_rate']*100:.3f}%")
             cc2.caption(f"듀레이션 {sol['duration']:.2f}년 · 듀레이션율 {sol['duration_rate']*100:.3f}%\n\n"
                         f"**→ 적용({disc_method}) {applied*100:.3f}%**")
@@ -3483,6 +3602,9 @@ def _actuary_work_detail(user, sid):
         else:
             _br_opts.append({"key": f"{s['id']}:single", "label": s["name"],
                              "set_id": s["id"], "band": "lt300"})
+    # 경험세트가 있어도 '다른 기초율'을 항상 고를 수 있게 한다.
+    _exp_present = any(o["key"].endswith(":exp") for o in _br_opts)
+    _nonexp_present = any(not o["key"].endswith(":exp") for o in _br_opts)
     # 개발원·경험 세트가 하나라도 있으면 그중에서 선택. 전혀 없을 때만 임시 샘플값 폴백.
     if not _br_opts:
         _br_opts = [{"key": "base:lt300", "label": "기본 샘플값(테스트용 · 정식 산출 아님)",
@@ -3490,6 +3612,10 @@ def _actuary_work_detail(user, sid):
         st.warning("⚠️ 등록된 **개발원 기초율·경험 기초율 세트가 없습니다.** 지금은 임시 샘플값으로만 "
                    "계산됩니다(정식 산출 아님). 상단 **기초율 관리**에서 개발원 세트를 등록하거나, "
                    "**경험 기초율**을 산출·저장한 뒤 선택하세요.")
+    elif _exp_present and not _nonexp_present:
+        # 경험세트만 있고 개발원 세트가 미등록 → 경험율 외 다른 기초율(표준)도 선택할 수 있도록 추가.
+        _br_opts.append({"key": "base:lt300", "label": "표준 기초율(개발원 세트 미등록 · 대체용)",
+                         "set_id": 0, "band": "lt300"})
     # 디폴트: 이 회사 경험세트가 있으면 그것(경험율 우선 선택), 없으면 최신 개발원세트 + 재직자수 밴드
     _keys = [o["key"] for o in _br_opts]
     _exp_first = next((s["id"] for s in _brsets if s.get("kind") == "experience"), None)
@@ -3507,11 +3633,13 @@ def _actuary_work_detail(user, sid):
     _sel_key = bcol.selectbox(
         "적용 기초율(세트 · 사업장규모)", _keys, index=_keys.index(_default_key),
         format_func=lambda k: _optmap[k]["label"], key=f"brsel_{sid}",
-        help=("이 기업의 경험 기초율이 있어 **경험율이 기본 선택**됩니다. " if _has_exp else
-              f"재직자수({_nrec}명) 기준 300인 {'이상' if _nrec >= 300 else '미만'} 밴드를 기본 선택합니다. ")
-             + "세트·규모를 바꿔 선택할 수 있습니다.")
+        help=("이 기업의 경험 기초율이 있어 **경험율이 기본 선택**되지만, 개발원·표준 등 "
+              "**다른 기초율로 바꿔 선택**할 수 있습니다. " if _has_exp else
+              f"재직자수({_nrec}명) 기준 300인 {'이상' if _nrec >= 300 else '미만'} 밴드를 기본 선택합니다. "
+              "세트·규모를 바꿔 선택할 수 있습니다."))
     if _has_exp:
-        bcol.caption("📈 이 기업의 경험 기초율이 등록되어 있어 기본으로 선택되었습니다.")
+        bcol.caption("📈 경험 기초율이 등록되어 **기본 선택**되었습니다. 필요하면 위에서 "
+                     "**개발원·표준 등 다른 기초율을 선택**할 수 있습니다.")
     base_set_id = _optmap[_sel_key]["set_id"]
     size_band = _optmap[_sel_key]["band"]
     # 적용 기초율(연령별 퇴직·사망·승급률) 조회·다운로드 — 산출 검증용
@@ -3616,7 +3744,7 @@ def _actuary_work_detail(user, sid):
                       for _, r in cfdf.iterrows() if r["기대급여지급액"]]
             if len(curve) >= 2 and len(cflist) >= 2:
                 _solved = DISC.solve(cflist, curve, _timing)
-                if disc_method == "듀레이션 적용":
+                if disc_method.startswith("듀레이션"):
                     disc_rate = _solved["duration_rate"]
                     _mlbl = f"듀레이션({_solved['duration']:.2f}년) 적용 할인율"
                 else:
@@ -3675,7 +3803,7 @@ def _actuary_work_detail(user, sid):
                              for _, r in _pcfdf.iterrows() if r["기대급여지급액"]]
                     if len(_pcfl) >= 2:
                         _psolved = DISC.solve(_pcfl, _pcurve, _timing)
-                        _pdisc = (_psolved["duration_rate"] if disc_method == "듀레이션 적용"
+                        _pdisc = (_psolved["duration_rate"] if disc_method.startswith("듀레이션")
                                   else _psolved["single_rate"])
                         _pres = calculate_census(records, _mkcfg_sal(prior_salary, _pdisc),
                                                  tables, with_detail=False)

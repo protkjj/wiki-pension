@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbo-engine"
+version = "0.2.0"
+description = "K-IFRS 1019 PUC 방식 퇴직급여부채(DBO) 계산 엔진"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+app = ["streamlit>=1.30"]
+
+[project.scripts]
+dbo = "dbo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -148,9 +148,16 @@ def parse_experience_data(source: Union[str, Path, bytes]) -> Dict:
 
 
 def _band_of(age: int, width: int = 5, lo: int = 15, hi: int = 60) -> int:
-    """연령 → 밴드 하한(예 5세폭: 27→25). 경계 밖은 최소/최대 밴드로 clamp."""
+    """연령 → 밴드 하한(예 5세폭: 27→25). 경계 밖은 최소/최대 밴드로 clamp.
+
+    밴드 집합은 range(lo, hi, width)라 상한 밴드는 hi를 포함하지 않는다. 정년(hi)에
+    정확히 걸리는 연령은 마지막 밴드로 접어 넣는다(정년 도달자는 이 밴드에 귀속) —
+    그렇지 않으면 존재하지 않는 밴드 키로 KeyError가 난다.
+    """
     age = max(lo, min(hi, age))
-    return ((age - lo) // width) * width + lo
+    band = ((age - lo) // width) * width + lo
+    top_band = lo + max(0, (hi - 1 - lo) // width) * width   # range(lo,hi,width)의 마지막 밴드
+    return min(band, top_band)
 
 
 # 퇴직자명부(직전 3~5년) 컬럼 별칭 — 경험퇴직률 산출용
@@ -466,6 +473,103 @@ def build_experience_template() -> bytes:
             if v is not None:
                 ws2.cell(row=i, column=j, value=v)
     ws2.freeze_panes = "A5"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# --- 연령별 퇴직률 곡선 직접 반영 (엑셀 결과값 그대로) -----------------------
+_CURVE_AGE = ["연령", "나이", "age", "도달연령"]
+_CURVE_RATE = ["퇴직률", "당기", "경험퇴직률", "탈퇴율", "퇴직율", "rate", "withdrawal"]
+
+
+def parse_withdrawal_curve(source: Union[str, Path, bytes]) -> List[Dict]:
+    """연령별 퇴직률 곡선 엑셀(2열: 연령, 퇴직률)을 그대로 읽어 기초율 행으로 변환.
+
+    회사가 엑셀로 확정한 연령별 경험퇴직률을 산출과정 없이 '결과값'만 반영할 때 사용.
+    반환: [{'age':int, 'withdrawal':float, 'raise_rate':None, 'mort_m':None, 'mort_f':None}, ...]
+    - 헤더/설명 행은 무시하고, (연령=정수, 퇴직률=숫자)인 행만 채택.
+    - 퇴직률이 1을 넘으면 백분율(%)로 보고 100으로 나눔(예: 5 → 0.05).
+    - 작성요령 시트는 건너뛴다.
+    """
+    from openpyxl import load_workbook
+
+    data = source if isinstance(source, (bytes, bytearray)) else Path(source).read_bytes()
+    wb = load_workbook(io.BytesIO(bytes(data)), data_only=True)
+    sheet = next((s for s in wb.sheetnames if "요령" not in s), wb.sheetnames[0])
+    grid = list(wb[sheet].iter_rows(values_only=True))
+
+    # 헤더로 연령/퇴직률 열 위치를 잡되, 없으면 앞 두 열(A=연령, B=퇴직률)로 가정.
+    a_col, r_col = 0, 1
+    for row in grid[:5]:
+        norm = {}
+        for idx, cell in enumerate(row or []):
+            if cell is not None:
+                norm.setdefault(_norm_header(cell), idx)
+        ai = next((norm[_norm_header(a)] for a in _CURVE_AGE if _norm_header(a) in norm), None)
+        ri = next((norm[_norm_header(a)] for a in _CURVE_RATE if _norm_header(a) in norm), None)
+        if ai is not None and ri is not None:
+            a_col, r_col = ai, ri
+            break
+
+    rows, seen = [], set()
+    for row in grid:
+        if not row or len(row) <= max(a_col, r_col):
+            continue
+        age = row[a_col]
+        rate = _to_float(row[r_col])
+        try:
+            age = int(float(age))
+        except (TypeError, ValueError):
+            continue                       # 헤더('연령','당기' 등)·빈 행은 건너뜀
+        if rate is None or not (0 <= age <= 120) or age in seen:
+            continue
+        if rate > 1:                       # 백분율 입력 보정
+            rate = rate / 100.0
+        seen.add(age)
+        rows.append({"age": age, "withdrawal": round(rate, 6),
+                     "raise_rate": None, "mort_m": None, "mort_f": None})
+    rows.sort(key=lambda r: r["age"])
+    return rows
+
+
+def build_withdrawal_curve_template(lo: int = 15, hi: int = 70) -> bytes:
+    """연령별 퇴직률 곡선 표준 양식 — 업로드 파일 포맷(연령 15~70 · '당기' 퇴직률) 그대로.
+
+    A열=연령(lo~hi 한 행씩), B열='당기'(연령별 당기 퇴직률). 계리사가 값을 채워 올린다.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "작성요령"
+    ws.column_dimensions["A"].width = 92
+    ws["A1"] = "[연령별 퇴직률 곡선] 작성요령"
+    ws["A1"].font = Font(name="맑은 고딕", size=13, bold=True, color="1F4E79")
+    for i, line in enumerate([
+        "· 회사가 엑셀 등으로 확정한 '연령별 당기 퇴직률'을 결과값 그대로 반영할 때 사용합니다.",
+        "· '퇴직률' 시트: A열=연령, B열='당기' 퇴직률. 연령마다 한 행씩 값을 채우세요.",
+        "· 퇴직률은 소수(0.05) 또는 %(5) 모두 인식합니다.",
+        "· 빠진 연령이 있으면 인접값으로 근사될 수 있으니 정년까지 모두 채우기를 권장합니다.",
+        "· 사망률·승급률은 이 곡선에 포함되지 않습니다(사망률=개발원 차용, 승급률=임금인상율 입력).",
+    ], start=3):
+        c = ws.cell(row=i, column=1, value=line)
+        c.font = Font(name="맑은 고딕", size=10)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws2 = wb.create_sheet("퇴직률")
+    fill = PatternFill("solid", fgColor="DCE6F1")
+    hf = Font(name="맑은 고딕", size=10, bold=True)
+    for j, name in enumerate(["연령", "당기"], start=1):
+        cell = ws2.cell(row=1, column=j, value=name)
+        cell.font = hf; cell.fill = fill
+        cell.alignment = Alignment(horizontal="center")
+        ws2.column_dimensions[chr(64 + j)].width = 14
+    for i, age in enumerate(range(lo, hi + 1), start=2):
+        ws2.cell(row=i, column=1, value=age)
+    ws2.freeze_panes = "A2"
 
     buf = io.BytesIO()
     wb.save(buf)

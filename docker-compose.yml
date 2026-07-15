@@ -1,0 +1,14 @@
+# WIKI 퇴직연금 관리 시스템 — 도커 실행 (도커 있는 경우)
+# 사용:  docker compose up -d --build      (시작·백그라운드)
+#        docker compose logs -f            (로그 보기)
+#        docker compose down               (중지)
+services:
+  app:
+    build: .
+    image: wiki-pension:latest
+    container_name: wiki-pension
+    ports:
+      - "8501:8501"          # 사내 다른 PC에서 http://서버IP:8501 접속
+    volumes:
+      - ./data:/app/data     # DB·업로드 파일을 호스트에 영속(재시작·재빌드해도 유지)
+    restart: unless-stopped  # 서버 부팅/장애 시 자동 재시작
